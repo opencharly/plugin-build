@@ -101,10 +101,17 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 	}
 
 	// --- 4. build-time plugin CONNECT (registry M — host leg) ---
+	// A build-time plugin that fails to CONNECT (a compile failure, a missing module,
+	// a download error) cannot serve its verbs — continuing would surface a later
+	// 'no provider registered' error naming the WRONG cause (charly#326). The connect
+	// failure is therefore FATAL: the build stops here with the actionable error
+	// (the plugin name + the underlying go build/load error are in err).
+	//
+	// This is deliberately ALL connect failures, not just compile failures: the host
+	// leg loads only the plugins the build REFERENCES (collectReferencedPluginWords), so
+	// a failure means a plugin the build needs could not be loaded. The prior
+	// best-effort warning left the build to die later with a misleading message.
 	if err := hostVoidLeg(ctx, ex, "buildengine-connect-plugins", rr); err != nil {
-		// A plugin candy that fails to COMPILE must stop the build with the actionable
-		// error (the plugin name + the go build error are in err) — NOT continue to a
-		// later 'no provider registered' failure that names the wrong cause (charly#326).
 		return spec.BuildResolveReply{Error: errString(err)}, nil
 	}
 
