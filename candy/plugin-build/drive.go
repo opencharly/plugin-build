@@ -264,3 +264,4 @@ func errString(err error) string {
 	}
 	return err.Error()
 }
+// store-bloat warning: see store_bloat.go + store_bloat_test.go
