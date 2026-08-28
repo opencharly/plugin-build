@@ -101,10 +101,18 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 	}
 
 	// --- 4. build-time plugin CONNECT (registry M — host leg) ---
-	if err := hostVoidLeg(ctx, ex, "buildengine-connect-plugins", rr); err != nil {
-		// Best-effort, mirroring the deleted NewGenerator's behavior: a connect failure warns; a plugin the build actually
-		// USES fails loudly later at OpEmit/OpResolve.
-		fmt.Fprintf(os.Stderr, "warning: build-time plugin load: %v\n", err)
+	// A build-time plugin that fails to CONNECT (a compile failure, a missing module,
+	// a download error) cannot serve its verbs — continuing would surface a later
+	// 'no provider registered' error naming the WRONG cause (charly#326). The connect
+	// failure is therefore FATAL: the build stops here with the actionable error
+	// (the plugin name + the underlying go build/load error are in err).
+	//
+	// This is deliberately ALL connect failures, not just compile failures: the host
+	// leg loads only the plugins the build REFERENCES (collectReferencedPluginWords), so
+	// a failure means a plugin the build needs could not be loaded. The prior
+	// best-effort warning left the build to die later with a misleading message.
+	if reply, done := connectPluginsOrFatal(ctx, ex, rr); done {
+		return reply, nil
 	}
 
 	// --- 5. pre-build VALIDATE gate (plugin↔plugin) ---
@@ -243,6 +251,23 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 		KeepImages:      int64(resolveIntPtrDrive(def.KeepImages)),
 		ResolvedProject: rp,
 	}, nil
+}
+
+// connectPluginsOrFatal runs the build-time plugin CONNECT leg (registry M — host
+// leg). On failure it returns the FATAL reply the build must stop on: a build-time
+// plugin that fails to CONNECT (a compile failure, a missing module, a download
+// error) cannot serve its verbs — continuing would surface a later
+// 'no provider registered' error naming the WRONG cause (charly#326). done=true
+// means the caller returns the reply immediately; done=false means the connect
+// leg succeeded and the build proceeds.
+//
+// Extracted as its own unit so the fatal-vs-warning semantics are pinned by a
+// regression test (B12) without faking the entire loader/scan leg family.
+func connectPluginsOrFatal(ctx context.Context, ex *sdk.Executor, rr spec.ResolvedProjectRequest) (reply spec.BuildResolveReply, done bool) {
+	if err := hostVoidLeg(ctx, ex, "buildengine-connect-plugins", rr); err != nil {
+		return spec.BuildResolveReply{Error: errString(err)}, true
+	}
+	return spec.BuildResolveReply{}, false
 }
 
 // buildDriveDescriptors builds the per-box drive descriptors (NO Containerfile content — the drive
@@ -388,3 +413,4 @@ func resolveUserContextPlugin(ctx context.Context, ex *sdk.Executor, cfg *spec.C
 		img.GID = info.GID
 	}
 }
+// see resolve_connect_fatal_test.go for the B12 gate
