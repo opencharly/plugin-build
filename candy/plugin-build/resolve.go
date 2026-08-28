@@ -413,3 +413,4 @@ func resolveUserContextPlugin(ctx context.Context, ex *sdk.Executor, cfg *spec.C
 		img.GID = info.GID
 	}
 }
+// see resolve_connect_fatal_test.go for the B12 gate
