@@ -102,9 +102,10 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 
 	// --- 4. build-time plugin CONNECT (registry M — host leg) ---
 	if err := hostVoidLeg(ctx, ex, "buildengine-connect-plugins", rr); err != nil {
-		// Best-effort, mirroring the deleted NewGenerator's behavior: a connect failure warns; a plugin the build actually
-		// USES fails loudly later at OpEmit/OpResolve.
-		fmt.Fprintf(os.Stderr, "warning: build-time plugin load: %v\n", err)
+		// A plugin candy that fails to COMPILE must stop the build with the actionable
+		// error (the plugin name + the go build error are in err) — NOT continue to a
+		// later 'no provider registered' failure that names the wrong cause (charly#326).
+		return spec.BuildResolveReply{Error: errString(err)}, nil
 	}
 
 	// --- 5. pre-build VALIDATE gate (plugin↔plugin) ---
