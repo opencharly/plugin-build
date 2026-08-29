@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/opencharly/sdk"
+	"github.com/opencharly/sdk/kit"
 	"github.com/opencharly/spec/spec"
 )
 
@@ -102,6 +103,9 @@ func runBoxBuild(ctx context.Context, ex *sdk.Executor, req spec.BuildRequest) (
 	if err != nil {
 		return nil, err
 	}
+	// The build created new images — invalidate the persistent image-list cache so
+	// the next status run re-fetches the fresh list instead of serving a stale one.
+	kit.InvalidateImageCache()
 
 	// Push after merge (Podman only; Docker buildx pushes during build).
 	if cfg.Push && cfg.EngineName == "podman" {

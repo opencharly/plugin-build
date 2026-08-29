@@ -2,9 +2,15 @@ package build
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/buildkit"
@@ -41,6 +47,21 @@ func resolveProjectEnvelope(ctx context.Context, ex *sdk.Executor, req spec.Reso
 		}
 		dir = cwd
 	}
+
+	// Persistent cache: the project load (LoadUnified over the full import
+	// closure) is the dominant cost of `charly status` (measured ~4.4s + GC
+	// pressure per load, and the status fan-out loads it once per collector).
+	// The project does not change often — only an edit to charly.yml or its
+	// imports mutates it — so the first call after the TTL expires re-fetches
+	// with user feedback and every subsequent call within the TTL reads the
+	// cache. The LIVE container state (podman ps) is never cached.
+	cachePath, key := projectCacheKey(dir)
+	if cachePath != "" {
+		if rp, ok := readProjectCache(cachePath, key); ok {
+			return *rp, nil
+		}
+	}
+	fmt.Fprintf(os.Stderr, "charly: resolving project (first run — may take a moment)...\n")
 
 	// LocalSuperproject mirrors the deleted charly/resolved_project_host.go's
 	// applySelfSuperprojectOverride(dir) call — reproduced here PURELY (os/exec + loaderkit, zero
@@ -98,7 +119,81 @@ func resolveProjectEnvelope(ctx context.Context, ex *sdk.Executor, req spec.Reso
 	// HostBuild leg via loaderkit.LoaderThreadedViaExecutor (no new seam).
 	rp.Primaries = loaderkit.LoaderThreadedViaExecutor(ctx, ex).Primaries
 
+	if cachePath != "" {
+		_ = writeProjectCache(cachePath, key, rp)
+	}
 	return *rp, nil
+}
+
+// projectCacheTTL is how long a cached resolved project is trusted before a
+// re-fetch. The project changes only on an edit to charly.yml or its imports,
+// so a 5-minute TTL makes consecutive status runs fast while still seeing edits
+// within a few minutes.
+const projectCacheTTL = 5 * time.Minute
+
+// projectCacheKey returns the resolved-project cache file + a content key (the
+// charly.yml content hash + the project dir), so an edit to the project
+// invalidates the cache immediately.
+func projectCacheKey(dir string) (string, string) {
+	cfg, err := spec.DefaultDeployConfigPath()
+	if err != nil {
+		return "", ""
+	}
+	cachePath := filepath.Join(filepath.Dir(cfg), "cache", "project.json")
+	data, err := os.ReadFile(filepath.Join(dir, spec.UnifiedFileName))
+	if err != nil {
+		return cachePath, dir
+	}
+	h := sha256.Sum256(data)
+	return cachePath, dir + ":" + hex.EncodeToString(h[:])
+}
+
+// projectCacheFile is the on-disk cache shape: the content key + the resolved
+// project + the resolution time (RFC3339).
+type projectCacheFile struct {
+	Key      string               `json:"key"`
+	Resolved string               `json:"resolved"`
+	Project  spec.ResolvedProject `json:"project"`
+}
+
+// readProjectCache returns the cached resolved project if fresh for key, else
+// (nil, false). A corrupt/absent file is a cache miss.
+func readProjectCache(path, key string) (*spec.ResolvedProject, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	var cf projectCacheFile
+	if json.Unmarshal(data, &cf) != nil || cf.Key != key {
+		return nil, false
+	}
+	resolved, err := time.Parse(time.RFC3339, cf.Resolved)
+	if err != nil || time.Since(resolved) > projectCacheTTL {
+		return nil, false
+	}
+	return &cf.Project, true
+}
+
+// writeProjectCache persists the resolved project under the advisory lock
+// (best-effort).
+func writeProjectCache(path, key string, rp *spec.ResolvedProject) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	cf := projectCacheFile{
+		Key:      key,
+		Resolved: time.Now().UTC().Format(time.RFC3339),
+		Project:  *rp,
+	}
+	data, err := json.Marshal(cf)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // applySelfSuperprojectOverridePlugin is the plugin-side, pure reproduction of charly core's
