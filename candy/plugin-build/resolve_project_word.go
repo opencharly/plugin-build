@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -55,7 +56,7 @@ func resolveProjectEnvelope(ctx context.Context, ex *sdk.Executor, req spec.Reso
 	// imports mutates it — so the first call after the TTL expires re-fetches
 	// with user feedback and every subsequent call within the TTL reads the
 	// cache. The LIVE container state (podman ps) is never cached.
-	cachePath, key := projectCacheKey(dir)
+	cachePath, key := projectCacheKey(dir, req)
 	if cachePath != "" {
 		if rp, ok := readProjectCache(cachePath, key); ok {
 			return *rp, nil
@@ -131,60 +132,106 @@ func resolveProjectEnvelope(ctx context.Context, ex *sdk.Executor, req spec.Reso
 // within a few minutes.
 const projectCacheTTL = 5 * time.Minute
 
-// projectCacheKey returns the resolved-project cache file + a content key (the
-// charly.yml content hash + the project dir), so an edit to the project
-// invalidates the cache immediately.
-func projectCacheKey(dir string) (string, string) {
+// projectCacheEntries bounds the on-disk cache. The key carries the request's scan SCOPE, so one
+// project legitimately has several live entries at once — an unwidened `charly status` resolve
+// plus one per add_candy: ref a deploy compiles. A handful covers that; the oldest is evicted.
+const projectCacheEntries = 16
+
+// projectCacheKey returns the resolved-project cache file + a content key: the charly.yml content
+// hash, the project dir, AND every request field that changes what the resolve PRODUCES rather
+// than merely what it costs.
+//
+// The scan-widening fields are part of the key because they change the envelope's CONTENTS.
+// ExtraCandyRefs (a deploy's add_candy: refs) is the ONLY way a host-side plugin candy that no
+// image closure reaches enters rp.Candies at all — refs_collect.go's own comment records that as a
+// fixed regression. Keying without it re-opened the same hole one layer up: a resolve widened for
+// one ref was served an envelope cached for a DIFFERENT widening, and the compile then failed with
+// `candy "..." not in resolved-project envelope`. Measured on distro-omarchy's
+// check-omarchy-desktop-vm, where the plugin-wl pin MASKED it — plugin-wl is also reachable
+// through pod-hyprland's image closure, so it sat in the unwidened envelope anyway — while the
+// plugin-quickshell pin, reachable ONLY through add_candy, was absent from all 167 cached candies.
+//
+// LocalSuperproject belongs here for the same reason: it applies a CHARLY_REPO_OVERRIDE around the
+// resolve, so it decides whether refs resolve from the local superproject or from the fetch cache.
+func projectCacheKey(dir string, req spec.ResolvedProjectRequest) (string, string) {
 	cfg, err := spec.DefaultDeployConfigPath()
 	if err != nil {
 		return "", ""
 	}
 	cachePath := filepath.Join(filepath.Dir(cfg), "cache", "project.json")
+
+	// Sorted before joining: the same scope requested in a different ORDER is the same scan, and
+	// must hit the same entry rather than resolving the whole project a second time.
+	extra := append([]string(nil), req.ExtraCandyRefs...)
+	sort.Strings(extra)
+	boxes := append([]string(nil), req.RequestedBoxes...)
+	sort.Strings(boxes)
+	scope := fmt.Sprintf("extra=%s|boxes=%s|disabled=%t|super=%t",
+		strings.Join(extra, ","), strings.Join(boxes, ","),
+		req.IncludeDisabled, req.LocalSuperproject)
+
 	data, err := os.ReadFile(filepath.Join(dir, spec.UnifiedFileName))
 	if err != nil {
-		return cachePath, dir
+		return cachePath, dir + "|" + scope
 	}
 	h := sha256.Sum256(data)
-	return cachePath, dir + ":" + hex.EncodeToString(h[:])
+	return cachePath, dir + "|" + hex.EncodeToString(h[:]) + "|" + scope
 }
 
-// projectCacheFile is the on-disk cache shape: the content key + the resolved
-// project + the resolution time (RFC3339).
-type projectCacheFile struct {
-	Key      string               `json:"key"`
+// projectCacheEntry is one cached resolve: the resolved project + its resolution time (RFC3339).
+type projectCacheEntry struct {
 	Resolved string               `json:"resolved"`
 	Project  spec.ResolvedProject `json:"project"`
 }
 
-// readProjectCache returns the cached resolved project if fresh for key, else
-// (nil, false). A corrupt/absent file is a cache miss.
+// projectCacheFile is the on-disk cache shape: entries keyed by the content key. A MAP rather than
+// the single slot it replaces — the key now carries the request's scan scope, so a deploy that
+// compiles several add_candy refs holds several live keys, and a single slot would make each one
+// evict the last and re-resolve the entire project every time.
+type projectCacheFile struct {
+	Entries map[string]projectCacheEntry `json:"entries"`
+}
+
+// readProjectCache returns the cached resolved project if fresh for key, else (nil, false). A
+// corrupt or absent file — or one still in the pre-map shape — is a cache miss.
 func readProjectCache(path, key string) (*spec.ResolvedProject, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, false
 	}
 	var cf projectCacheFile
-	if json.Unmarshal(data, &cf) != nil || cf.Key != key {
+	if json.Unmarshal(data, &cf) != nil {
 		return nil, false
 	}
-	resolved, err := time.Parse(time.RFC3339, cf.Resolved)
+	entry, ok := cf.Entries[key]
+	if !ok {
+		return nil, false
+	}
+	resolved, err := time.Parse(time.RFC3339, entry.Resolved)
 	if err != nil || time.Since(resolved) > projectCacheTTL {
 		return nil, false
 	}
-	return &cf.Project, true
+	return &entry.Project, true
 }
 
-// writeProjectCache persists the resolved project under the advisory lock
-// (best-effort).
+// writeProjectCache persists the resolved project under key, KEEPING the other live entries and
+// evicting the oldest once the file exceeds projectCacheEntries (best-effort).
 func writeProjectCache(path, key string, rp *spec.ResolvedProject) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	cf := projectCacheFile{
-		Key:      key,
+	cf := projectCacheFile{Entries: map[string]projectCacheEntry{}}
+	if existing, err := os.ReadFile(path); err == nil {
+		var prev projectCacheFile
+		if json.Unmarshal(existing, &prev) == nil && prev.Entries != nil {
+			cf.Entries = prev.Entries
+		}
+	}
+	cf.Entries[key] = projectCacheEntry{
 		Resolved: time.Now().UTC().Format(time.RFC3339),
 		Project:  *rp,
 	}
+	evictOldestProjectCacheEntries(cf.Entries, projectCacheEntries)
 	data, err := json.Marshal(cf)
 	if err != nil {
 		return err
@@ -194,6 +241,25 @@ func writeProjectCache(path, key string, rp *spec.ResolvedProject) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// evictOldestProjectCacheEntries trims entries to at most max, dropping the oldest first. An
+// unparseable timestamp sorts oldest, so a corrupt entry is evicted before a good one.
+func evictOldestProjectCacheEntries(entries map[string]projectCacheEntry, max int) {
+	for len(entries) > max {
+		oldestKey := ""
+		var oldest time.Time
+		for k, entry := range entries {
+			t, err := time.Parse(time.RFC3339, entry.Resolved)
+			if err != nil {
+				t = time.Time{}
+			}
+			if oldestKey == "" || t.Before(oldest) {
+				oldestKey, oldest = k, t
+			}
+		}
+		delete(entries, oldestKey)
+	}
 }
 
 // applySelfSuperprojectOverridePlugin is the plugin-side, pure reproduction of charly core's

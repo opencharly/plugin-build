@@ -1,7 +1,7 @@
 version: 2026.232.0520
 plugin-build:
     candy:
-        version: 2026.206.1217
+        version: 2026.243.1550
         description: |-
             The BUILD-DRIVE plugin: it OWNS the podman build drive (the build-order loop, the
             per-image build lock, the push, and the merge gate) for `build:box` (the `charly box
