@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/buildkit"
@@ -143,7 +144,29 @@ func scanLocalLeg(ctx context.Context, ex *sdk.Executor, uf *spec.UnifiedFile, d
 //     through it was an identity). `buildengine-scan-remote` died with it.
 //
 // So NONE of the three ScanSeams legs is a host round-trip any more.
-func scanSeamsLeg(ctx context.Context, ex *sdk.Executor, rr spec.ResolvedProjectRequest, cfg *spec.Config, distroCfg *spec.DistroConfig) loaderkit.ScanSeams {
+// diagWarnSink collects scan advisories into a Diagnostics envelope as warning-severity
+// items, which is what makes them COUNTABLE — `charly box validate` reports the number, and
+// before this they were stderr writes it could never see.
+//
+// Severity is "warning" deliberately: these are advisories, not failures, and emitVerdict
+// filters them out of the error verdict while the summary counts them.
+func diagWarnSink(diags *spec.Diagnostics) func(string, ...any) {
+	return func(format string, args ...any) {
+		diags.Items = append(diags.Items, spec.Diagnostic{
+			Severity: "warning",
+			Message:  fmt.Sprintf(format, args...),
+		})
+	}
+}
+
+// stderrWarn is the advisory sink for the BUILD paths, which have no diagnostics envelope to
+// collect into. Named and passed explicitly rather than defaulted from a nil: every caller
+// states where its advisories go, so there is no implicit behaviour to discover later.
+func stderrWarn(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+}
+
+func scanSeamsLeg(ctx context.Context, ex *sdk.Executor, rr spec.ResolvedProjectRequest, cfg *spec.Config, distroCfg *spec.DistroConfig, warn func(string, ...any)) loaderkit.ScanSeams {
 	return loaderkit.ScanSeams{
 		CollectRemoteRefs: func(localScanned map[string]spec.ScannedCandy) ([]loaderkit.RemoteDownload, error) {
 			opts := spec.BoxResolveOpts(rr.RequestedBoxes, rr.IncludeDisabled)
@@ -157,6 +180,11 @@ func scanSeamsLeg(ctx context.Context, ex *sdk.Executor, rr spec.ResolvedProject
 		},
 		EnsureRepo: ensureRepoLeg(ctx, ex),
 		ScanRemote: scanRemoteLeg(parseCandyManifestLeg(ctx, ex, distroCfg)),
+		// Scan advisories (candy-version skew, local-shadow notes) arrive as DATA here rather
+		// than going straight to stderr, so a caller can count and report them. The tolerant
+		// resolver passes diagWarnSink to collect them as diagnostics; the build paths pass
+		// stderrWarn, which prints as before.
+		Warn: warn,
 	}
 }
 
@@ -212,13 +240,18 @@ func scanRemoteLeg(parseDoc func(string) (*spec.Candy, error)) func(cacheDir, re
 // set verbatim (the reachability walk runs ONCE per namespace in fillNamespacedBoxes, over the
 // namespace's own cfg); EnsureRepo/ScanRemote reuse the cfg-agnostic shared legs for the transitive
 // fetch. Nothing here crosses to the host.
-func namespaceScanSeams(ctx context.Context, ex *sdk.Executor, downloads []spec.RemoteDownload, distroCfg *spec.DistroConfig) loaderkit.ScanSeams {
+func namespaceScanSeams(ctx context.Context, ex *sdk.Executor, downloads []spec.RemoteDownload, distroCfg *spec.DistroConfig, warn func(string, ...any)) loaderkit.ScanSeams {
 	return loaderkit.ScanSeams{
 		CollectRemoteRefs: func(_ map[string]spec.ScannedCandy) ([]loaderkit.RemoteDownload, error) {
 			return downloads, nil
 		},
 		EnsureRepo: ensureRepoLeg(ctx, ex),
 		ScanRemote: scanRemoteLeg(parseCandyManifestLeg(ctx, ex, distroCfg)),
+		// Scan advisories (candy-version skew, local-shadow notes) arrive as DATA here rather
+		// than going straight to stderr, so a caller can count and report them. The tolerant
+		// resolver passes diagWarnSink to collect them as diagnostics; the build paths pass
+		// stderrWarn, which prints as before.
+		Warn: warn,
 	}
 }
 
@@ -404,7 +437,7 @@ func fillNamespacedBoxes(ctx context.Context, ex *sdk.Executor, uf *spec.Unified
 			spec.WithLocalRawRefs(opts, scanned),
 			loaderkit.RefsSeamsFromExecutor(ctx, ex),
 		)
-		if nsLayers, err := loaderkit.ScanCandyFromLocal(scanned, ic, namespaceScanSeams(ctx, ex, downloads, distroCfg)); err == nil {
+		if nsLayers, err := loaderkit.ScanCandyFromLocal(scanned, ic, namespaceScanSeams(ctx, ex, downloads, distroCfg, stderrWarn)); err == nil {
 			for name, c := range nsLayers {
 				if c == nil {
 					continue
