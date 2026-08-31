@@ -87,5 +87,6 @@ func humanBytes(n int64) string {
 	}
 	return fmt.Sprintf("%.1f%ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
+
 // disposable proof: see the PR body
 // store-bloat: see store_bloat.go (podman system df probe)
