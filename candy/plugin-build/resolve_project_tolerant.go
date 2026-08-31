@@ -2,6 +2,7 @@ package build
 
 import (
 	"context"
+	"fmt"
 	"os"
 
 	"github.com/opencharly/sdk"
@@ -75,7 +76,9 @@ func resolveProjectEnvelopeTolerant(ctx context.Context, ex *sdk.Executor, req s
 	if err != nil {
 		addDiag(err)
 	} else {
-		scanned, serr := loaderkit.ScanCandyFromLocal(localScanned, initCfg, scanSeamsLeg(ctx, ex, resReq, cfg, distroCfg))
+		scanned, serr := loaderkit.ScanCandyFromLocal(localScanned, initCfg, scanSeamsLeg(ctx, ex, resReq, cfg, distroCfg, func(format string, args ...any) {
+			diags.Items = append(diags.Items, spec.Diagnostic{Severity: "warning", Message: fmt.Sprintf(format, args...)})
+		}))
 		if serr != nil {
 			addDiag(serr)
 		} else {

@@ -95,7 +95,7 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 	if err != nil {
 		return spec.BuildResolveReply{Error: errString(err)}, nil
 	}
-	layers, err := loaderkit.ScanCandyFromLocal(localScanned, initCfg, scanSeamsLeg(ctx, ex, rr, cfg, distroCfg))
+	layers, err := loaderkit.ScanCandyFromLocal(localScanned, initCfg, scanSeamsLeg(ctx, ex, rr, cfg, distroCfg, stderrWarn))
 	if err != nil {
 		return spec.BuildResolveReply{Error: errString(err)}, nil
 	}
@@ -413,4 +413,5 @@ func resolveUserContextPlugin(ctx context.Context, ex *sdk.Executor, cfg *spec.C
 		img.GID = info.GID
 	}
 }
+
 // see resolve_connect_fatal_test.go for the B12 gate
