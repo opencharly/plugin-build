@@ -17,12 +17,12 @@ package build
 // This file MIRRORS sdk loaderkit/parse_guard_test.go's TestParse_SubstrateDeclaredIterateStaysData
 // at the plugin-build level, over the SAME exported primitives the build:project envelope
 // resolve runs (resolveProjectEnvelope → loaderkit.LoadUnifiedViaExecutor → ParseDoc →
-// per-entity CUE gates → spec.ValidateDeploymentTree on the merged Fleet):
+// per-entity CUE gates → spec.ValidateDeploymentTree on the merged Deploy):
 //
 //   1. the imageless agent_provisioned pod + iterate block parses and survives
 //     (the CUE gates accept it; the node body + the deploy-level sibling classify);
 //   2. an imageful pod still parses (the legacy spelling is unchanged);
-//   3. the Fleet gate (spec.ValidateDeploymentTree) keeps the imageless
+//   3. the Deploy gate (spec.ValidateDeploymentTree) keeps the imageless
 //     agent_provisioned node in the envelope Deploy map and — discriminator — still
 //     rejects a plain imageless pod without the flag, plus the position-derived member
 //     tree (DeployLevelMembers/InSubstrateMembers/MemberByName/HasMembers) classifies
@@ -199,15 +199,15 @@ check-agent-live:
 
 // TestBuildProjectEnvelope_FleetGateAndMemberTree proves the envelope Deploy-map gate and
 // the position-derived member tree over the settled contracts:
-//   - the imageless agent_provisioned pod STAYS in the Fleet (the ValidateDeployRequiresBox
+//   - the imageless agent_provisioned pod STAYS in the Deploy (the ValidateDeployRequiresBox
 //     exemption) — the exact gate that used to drop it;
 //   - the discriminator: the same imageless node WITHOUT the flag is rejected with the
 //     box-required error (the gate did not go away — the exemption is the only change);
 //   - the fedora migrated deploy-level sibling spelling classifies via the member tree
 //     consult sites (DeployLevelMembers/InSubstrateMembers/MemberByName/HasMembers).
 func TestBuildProjectEnvelope_FleetGateAndMemberTree(t *testing.T) {
-	t.Run("agent-provisioned-stays-in-fleet", func(t *testing.T) {
-		fleet := map[string]spec.Deploy{
+	t.Run("agent-provisioned-stays-in-deploy", func(t *testing.T) {
+		deploy := map[string]spec.Deploy{
 			"check-agent-live": {
 				Target:           "pod",
 				AgentProvisioned: true,
@@ -217,16 +217,16 @@ func TestBuildProjectEnvelope_FleetGateAndMemberTree(t *testing.T) {
 				},
 			},
 		}
-		if err := spec.ValidateDeploymentTree(fleet); err != nil {
+		if err := spec.ValidateDeploymentTree(deploy); err != nil {
 			t.Fatalf("ValidateDeploymentTree: the imageless agent_provisioned pod must stay in the envelope Deploy map: %v", err)
 		}
 	})
 
 	t.Run("plain-imageless-pod-still-rejected", func(t *testing.T) {
-		fleet := map[string]spec.Deploy{
+		deploy := map[string]spec.Deploy{
 			"bare-pod": {Target: "pod"},
 		}
-		err := spec.ValidateDeploymentTree(fleet)
+		err := spec.ValidateDeploymentTree(deploy)
 		if err == nil {
 			t.Fatal("ValidateDeploymentTree: want the box-required rejection for a plain imageless pod")
 		}
