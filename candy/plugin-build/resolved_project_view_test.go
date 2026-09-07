@@ -135,11 +135,11 @@ func fixedResolvedProjectFixture(t *testing.T) *spec.ResolvedProject {
 		Boxes:   map[string]spec.ResolvedBoxView{"demo": deploykit.ProjectResolvedBox(fullResolvedBoxFixture())},
 		Candies: map[string]spec.CandyView{"charly": candyView},
 	}
-	fleet := map[string]spec.FleetNode{"demo-pod": {Target: "pod", Description: "demo deploy"}}
-	for k, v := range fleet {
+	deploy := map[string]spec.DeployNode{"demo-pod": {Target: "pod", Description: "demo deploy"}}
+	for k, v := range deploy {
 		node := v
 		if rp.Deploy == nil {
-			rp.Deploy = make(map[string]*spec.Deploy, len(fleet))
+			rp.Deploy = make(map[string]*spec.Deploy, len(deploy))
 		}
 		rp.Deploy[k] = &node
 	}
