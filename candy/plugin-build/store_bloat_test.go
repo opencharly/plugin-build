@@ -39,15 +39,15 @@ func TestParseStoreReclaimableBadJSON(t *testing.T) {
 	}
 }
 
-// TestWarnIfStoreBloatedFromPayload pins the threshold: a store with reclaimable bytes above
-// storeBloatReclaimableThreshold warns and names `charly clean --deep`; a store below the
+// TestNoticeIfStoreBloatedFromPayload pins the threshold: a store with reclaimable bytes above
+// storeBloatReclaimableThreshold emits an advisory naming `charly clean --deep`; a store below the
 // threshold stays silent; a non-podman engine never probes.
 func TestNoticeIfStoreBloatedFromPayload(t *testing.T) {
 	bloated := []byte(`[{"Type":"Images","RawSize":111909732884,"RawReclaimable":105746969002}]`)
 	var buf bytes.Buffer
 	noticeIfStoreBloatedFromPayload(bloated, &buf)
 	if !strings.Contains(buf.String(), "charly clean --deep") {
-		t.Errorf("bloated store: want a warning naming `charly clean --deep`, got %q", buf.String())
+		t.Errorf("bloated store: want an ADVISORY naming `charly clean --deep`, got %q", buf.String())
 	}
 	if !strings.Contains(buf.String(), "#173") {
 		t.Errorf("bloated store: want the issue reference, got %q", buf.String())
@@ -64,17 +64,17 @@ func TestNoticeIfStoreBloatedFromPayload(t *testing.T) {
 	buf.Reset()
 	noticeIfStoreBloatedFromPayload(lean, &buf)
 	if buf.Len() != 0 {
-		t.Errorf("lean store: want no warning, got %q", buf.String())
+		t.Errorf("lean store: want no advisory, got %q", buf.String())
 	}
 }
 
-// TestWarnIfStoreBloatedEngineGate pins that the probe only runs for the podman engine (docker
+// TestNoticeIfStoreBloatedEngineGate pins that the probe only runs for the podman engine (docker
 // builds never exec podman system df).
 func TestNoticeIfStoreBloatedEngineGate(t *testing.T) {
 	var buf bytes.Buffer
 	// engine != "podman" must return without probing; the payload is irrelevant.
 	noticeIfStoreBloated("docker", &buf)
 	if buf.Len() != 0 {
-		t.Errorf("docker engine: want no warning, got %q", buf.String())
+		t.Errorf("docker engine: want no advisory, got %q", buf.String())
 	}
 }
