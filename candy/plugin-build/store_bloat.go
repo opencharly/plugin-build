@@ -39,12 +39,13 @@ func parseStoreReclaimable(payload []byte) (reclaimable, total int64, err error)
 	return 0, 0, fmt.Errorf("parse podman system df: no Images entry")
 }
 
-// warnIfStoreBloated runs `podman system df --format json` and, when the store's reclaimable
-// bytes exceed storeBloatReclaimableThreshold, prints a warning naming the purge that addresses
+// noticeIfStoreBloated runs `podman system df --format json` and, when the store's reclaimable
+// bytes exceed storeBloatReclaimableThreshold, prints an ADVISORY (the `notice:` prefix, the
+// check scanner's non-gating tier) naming the purge that addresses
 // it (`charly clean --deep`). It is fail-soft by design: a store probe that fails (podman absent,
-// non-JSON output, no Images entry) is skipped silently — the warning is a hygiene nudge, never a
+// non-JSON output, no Images entry) is skipped silently — the advisory is a hygiene nudge, never a
 // build blocker (R4: no retry loops, no sleeps; the probe runs exactly once per build drive).
-func warnIfStoreBloated(engine string, stderr io.Writer) {
+func noticeIfStoreBloated(engine string, stderr io.Writer) {
 	if engine != "podman" {
 		return
 	}
@@ -52,12 +53,12 @@ func warnIfStoreBloated(engine string, stderr io.Writer) {
 	if err != nil {
 		return
 	}
-	warnIfStoreBloatedFromPayload(out, stderr)
+	noticeIfStoreBloatedFromPayload(out, stderr)
 }
 
-// warnIfStoreBloatedFromPayload is the payload-driven half of warnIfStoreBloated (split out so the
+// noticeIfStoreBloatedFromPayload is the payload-driven half of noticeIfStoreBloated (split out so the
 // threshold logic is unit-testable without exec'ing podman).
-func warnIfStoreBloatedFromPayload(payload []byte, stderr io.Writer) {
+func noticeIfStoreBloatedFromPayload(payload []byte, stderr io.Writer) {
 	reclaimable, total, err := parseStoreReclaimable(payload)
 	if err != nil {
 		return
