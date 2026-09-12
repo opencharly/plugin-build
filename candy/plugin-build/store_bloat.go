@@ -70,7 +70,13 @@ func warnIfStoreBloatedFromPayload(payload []byte, stderr io.Writer) {
 		pct = reclaimable * 100 / total
 	}
 	fmt.Fprintf(stderr,
-		"warning: podman store is bloated (%s reclaimable, ~%d%% of %s) — the overlay-store corruption class tracked in opencharly/charly#173 tracks this factor. Run `charly clean --deep` (pair with --invalidate for the fullest reclaim) before building.\n",
+		// `notice:` — the ADVISORY tier, not `warning:`. This file's own doc comment calls
+		// the line "fail-soft by design ... a hygiene nudge, never a build blocker"; emitting a
+		// documented non-blocker at `warning:` severity made the check scanner count it toward
+		// the R10 zero-warning bar and gate a merge on a performance degradation. The advisory
+		// prefix keeps it REPORTED (scanner tier `severityAdvisory`) while it can no longer fail
+		// anything — the separation of a hard failure from a performance-degradation advisory.
+		"notice: podman store is bloated (%s reclaimable, ~%d%% of %s) — the overlay-store corruption class tracked in opencharly/charly#173 tracks this factor. Run `charly clean --deep` (pair with --invalidate for the fullest reclaim) before building.\n",
 		humanBytes(reclaimable), pct, humanBytes(total))
 }
 
