@@ -80,7 +80,7 @@ func runBoxBuild(ctx context.Context, ex *sdk.Executor, req spec.BuildRequest) (
 	// reproduced even with fully serialized intra-build stages, implicating the store-bloat
 	// co-factor. Warn once per drive when the podman store is bloated so the operator can run
 	// `charly clean --deep` before the build. Fail-soft: a probe failure is skipped silently.
-	warnIfStoreBloated(cfg.Engine, os.Stderr)
+	noticeIfStoreBloated(cfg.Engine, os.Stderr)
 
 	// Render Containerfiles via deploykit.Generator (the render DRIVE, #67).
 	containerfiles, err := renderContainerfiles(ctx, ex, reply, req.Dir, req.DevLocalPkg)
