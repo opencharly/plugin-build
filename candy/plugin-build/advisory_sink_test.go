@@ -58,7 +58,7 @@ func TestStderrWarnWritesToStderr(t *testing.T) {
 	}
 	os.Stderr = w
 	stderrWarn("candy %s resolved to multiple versions", "acme/thing")
-	w.Close()
+	_ = w.Close()
 	os.Stderr = orig
 
 	var buf bytes.Buffer

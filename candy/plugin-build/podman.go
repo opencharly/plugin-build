@@ -34,9 +34,17 @@ func (c driveConfig) buildImage(box spec.BuildResolveBox, containerfile string) 
 	// (so a shared intermediate built by many parallel beds is built COLD once — the others block
 	// here, then cache-hit), while DISTINCT images (the leaf fan-out) take distinct locks and build
 	// in parallel. Held across the podman build for this image only.
+	//
+	// The wait itself is spec/lock's bounded-but-REPORTED one (opencharly/spec #132, pinned below): a
+	// peer building the SAME image is a SLOW holder, not a stuck one, so the second builder QUEUES —
+	// reporting the holder while it waits, and naming the holder pid + command if the bound is ever
+	// reached. Before that release the wait gave up after 2 minutes and named nobody, so a lane that
+	// merely raced a peer's cold build took a HARD failure (measured: `acquiring build lock for
+	// githubrunner: flock .../image-<sha8>.lock: lock held by another process for > 2m0s`, check run
+	// 2026.255.2310) instead of cache-hitting once the peer finished.
 	release, err := kit.AcquireImageBuildLock(box.FullTag)
 	if err != nil {
-		return fmt.Errorf("acquiring build lock for %s: %w", box.Name, err)
+		return imageBuildLockError(box, err)
 	}
 	defer func() { _ = release() }()
 
@@ -59,6 +67,14 @@ func (c driveConfig) buildImage(box spec.BuildResolveBox, containerfile string) 
 	}
 
 	return nil
+}
+
+// imageBuildLockError renders the per-image build-lock failure. The primitive names the HOLDER
+// (pid + command, resolved from the kernel); this wrap adds what the primitive cannot know — WHICH
+// box, the LOCK KEY (the tag-stripped ref, so the contended artifact is identifiable), and what to
+// do about it. It stays wrapped with %w so callers can still errors.Is/As the primitive's error.
+func imageBuildLockError(box spec.BuildResolveBox, err error) error {
+	return fmt.Errorf("acquiring the per-image build lock for %s (%s): %w — another charly process is building this image; wait for it to finish and re-run (the second build then cache-hits)", box.Name, box.FullTag, err)
 }
 
 // buildLocalArgs constructs args for a local (single-platform, load into store) build. Uses -f - to
