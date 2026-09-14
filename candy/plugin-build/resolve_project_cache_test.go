@@ -40,7 +40,9 @@ func TestProjectCacheRoundTrip(t *testing.T) {
 	}
 }
 
-func TestProjectCacheTTLExpiry(t *testing.T) {
+// TestProjectCacheServedRegardlessOfAge proves the content-addressing contract: NO time validity.
+// A very old entry is served while its key is present; only a CHANGED input (a new key) misses.
+func TestProjectCacheServedRegardlessOfAge(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "charly.yml")
 	t.Setenv("CHARLY_DEPLOY_CONFIG", cfg)
@@ -48,17 +50,103 @@ func TestProjectCacheTTLExpiry(t *testing.T) {
 	if err := writeProjectCache(path, key, &spec.ResolvedProject{Version: "v1"}); err != nil {
 		t.Fatal(err)
 	}
-	// Backdate the entry beyond the TTL.
+	// Backdate the RECLAMATION stamp by a year; the entry must still be served.
 	data, _ := os.ReadFile(path)
 	var cf projectCacheFile
 	_ = json.Unmarshal(data, &cf)
 	entry := cf.Entries[key]
-	entry.Resolved = time.Now().Add(-2 * projectCacheTTL).UTC().Format(time.RFC3339)
+	entry.Resolved = time.Now().AddDate(-1, 0, 0).UTC().Format(time.RFC3339)
 	cf.Entries[key] = entry
 	out, _ := json.Marshal(cf)
 	_ = os.WriteFile(path, out, 0o644)
+	if _, ok := readProjectCache(path, key); !ok {
+		t.Fatal("a present key must be served regardless of age (no TTL)")
+	}
+}
+
+// TestProjectCacheKeyIncludesDiscoveredManifests is the RCA 2026.257 regression guard. The eval
+// lane RENDERS a per-PR bed into a discover root (pr-beds/) DURING its run; the former key hashed
+// only the top-level charly.yml, so once the first lane cached a skeleton envelope (before the
+// beds existed) every later lane was served that stale envelope and its bed entity was absent
+// from Deploy[entity] -> `charly check run: no entity "check-omarchy-pr-<N>-vm"`. The key MUST
+// change when a discovered manifest's content is added or changed.
+func TestProjectCacheKeyIncludesDiscoveredManifests(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CHARLY_DEPLOY_CONFIG", filepath.Join(dir, "deploy.yml"))
+	// a project whose discover root is pr-beds/
+	if err := os.WriteFile(filepath.Join(dir, spec.UnifiedFileName),
+		[]byte("version: 2026.240.1943\ndiscover:\n  - path: pr-beds\n    recursive: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, before := projectCacheKey(dir, probeReq(dir))
+
+	// render a bed AFTER the first resolve (the lane's mid-run render)
+	if err := os.MkdirAll(filepath.Join(dir, "pr-beds", "pr-10129"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pr-beds", "pr-10129", spec.UnifiedFileName),
+		[]byte("version: 2026.240.1943\ncheck-omarchy-pr-10129-vm:\n  vm:\n    from: golden\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, after := projectCacheKey(dir, probeReq(dir))
+	if before == after {
+		t.Fatal("a NEW discovered manifest did not change the key — the cache would serve a stale envelope (the `no entity` bug)")
+	}
+
+	// and a CONTENT change to that bed must re-key too
+	if err := os.WriteFile(filepath.Join(dir, "pr-beds", "pr-10129", spec.UnifiedFileName),
+		[]byte("version: 2026.240.1943\ncheck-omarchy-pr-10129-vm:\n  vm:\n    from: golden-2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, changed := projectCacheKey(dir, probeReq(dir))
+	if after == changed {
+		t.Fatal("a CHANGED discovered manifest did not change the key")
+	}
+}
+
+// TestProjectCacheKeyFailsClosedOnUnreadableManifest proves the fail-closed contract: if the
+// manifest set cannot be fully enumerated, the key is empty, so the caller never reads (or writes)
+// a digest that could omit a manifest and serve a stale HIT.
+func TestProjectCacheKeyFailsClosedOnUnreadableManifest(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CHARLY_DEPLOY_CONFIG", filepath.Join(dir, "deploy.yml"))
+	sub := filepath.Join(dir, "pr-beds", "pr-1")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, spec.UnifiedFileName), []byte("version: 2026.240.1943\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bed := filepath.Join(sub, spec.UnifiedFileName)
+	if err := os.WriteFile(bed, []byte("version: 2026.240.1943\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, key := projectCacheKey(dir, probeReq(dir)); key == "" {
+		t.Fatal("a fully-enumerable tree must produce a key")
+	}
+	// Make the manifest unreadable (mode 000); on a non-root test runner the read fails.
+	if err := os.Chmod(bed, 0o000); err != nil {
+		t.Skip("chmod unsupported")
+	}
+	t.Cleanup(func() { _ = os.Chmod(bed, 0o644) })
+	if os.Geteuid() == 0 {
+		t.Skip("running as root — mode 000 is still readable")
+	}
+	path, key := projectCacheKey(dir, probeReq(dir))
+	if key != "" {
+		t.Fatalf("an unreadable manifest must yield an EMPTY key (fail closed), got %q", key)
+	}
+	// The caller contract: read MISSES and write is a no-op, so the un-enumerable
+	// tree resolves fresh and never hits a possibly-stale entry or errors.
 	if _, ok := readProjectCache(path, key); ok {
-		t.Fatal("readProjectCache: stale entry should miss")
+		t.Fatal("an empty key must always MISS (never serve a stale entry)")
+	}
+	if err := writeProjectCache(path, key, &spec.ResolvedProject{Version: "v1"}); err != nil {
+		t.Fatalf("writeProjectCache with an empty key must be a no-op, got %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("an empty-key write must not create the cache file (%v)", err)
 	}
 }
 
