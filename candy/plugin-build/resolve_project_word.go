@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,8 +16,10 @@ import (
 
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/buildkit"
+	"github.com/opencharly/sdk/kit"
 	"github.com/opencharly/sdk/loaderkit"
 	"github.com/opencharly/spec/spec"
+	"gopkg.in/yaml.v3"
 )
 
 // resolve_project_word.go — the `build:project` word (#55 step3 unit 3b): the PLUGIN-SIDE
@@ -126,20 +129,24 @@ func resolveProjectEnvelope(ctx context.Context, ex *sdk.Executor, req spec.Reso
 	return *rp, nil
 }
 
-// projectCacheTTL is how long a cached resolved project is trusted before a
-// re-fetch. The project changes only on an edit to charly.yml or its imports,
-// so a 5-minute TTL makes consecutive status runs fast while still seeing edits
-// within a few minutes.
-const projectCacheTTL = 5 * time.Minute
-
 // projectCacheEntries bounds the on-disk cache. The key carries the request's scan SCOPE, so one
 // project legitimately has several live entries at once — an unwidened `charly status` resolve
 // plus one per add_candy: ref a deploy compiles. A handful covers that; the oldest is evicted.
 const projectCacheEntries = 16
 
-// projectCacheKey returns the resolved-project cache file + a content key: the charly.yml content
-// hash, the project dir, AND every request field that changes what the resolve PRODUCES rather
-// than merely what it costs.
+// projectCacheKey returns the resolved-project cache file + a content key over EVERY input the
+// resolve consumes: (1) the top-level charly.yml bytes, (2) the CONTENT of every discovered
+// manifest (the discover: roots), (3) the request's scan-widening scope, and (4) the project dir.
+//
+// (2) is the RCA 2026.257 fix. The discover: roots hold the entities the resolve folds in — for
+// eval-omarchy that is pr-beds/**, where the eval lane RENDERS a per-PR bed DURING its run. The
+// former key hashed only charly.yml, so once the first lane cached a skeleton envelope (before the
+// beds existed), every later lane was served that stale envelope for the 5-minute TTL and its bed
+// entity was absent from Deploy[entity] -> `charly check run: no entity "check-omarchy-pr-<N>-vm"`.
+// (Reproduced: with pr-beds/ moved away, resolve+status cached 0 pr-beds; restoring 32 bed files
+// left the cache still reporting 0 — the charly.yml-only key never saw the tree.) Hashing the
+// discovered manifests' bytes means a rendered bed changes the key -> an immediate miss -> the
+// fresh resolve sees it. There is no TTL dependency left in the key's correctness.
 //
 // The scan-widening fields are part of the key because they change the envelope's CONTENTS.
 // ExtraCandyRefs (a deploy's add_candy: refs) is the ONLY way a host-side plugin candy that no
@@ -170,12 +177,55 @@ func projectCacheKey(dir string, req spec.ResolvedProjectRequest) (string, strin
 		strings.Join(extra, ","), strings.Join(boxes, ","),
 		req.IncludeDisabled, req.LocalSuperproject)
 
+	h := sha256.New()
+	if data, rerr := os.ReadFile(filepath.Join(dir, spec.UnifiedFileName)); rerr == nil {
+		_, _ = h.Write(data)
+	}
+	_, _ = h.Write([]byte{0})
+	discoverDigest(h, dir)
+	return cachePath, dir + "|" + hex.EncodeToString(h.Sum(nil)) + "|" + scope
+}
+
+// discoverDigest folds the CONTENT of every discovered manifest under the project root into the
+// hash — the discover: roots the resolve reads beyond the top-level charly.yml (RCA 2026.257).
+// It parses ONLY the top-level file's discover: block (cheap), then walks each root for its
+// manifest via the shared loader primitive and hashes each manifest file's bytes, in a sorted
+// path order so the digest is stable. A discover-parse failure folds nothing — the top-level
+// charly.yml hash still covers the config, and the resolve's own load will surface any real error.
+func discoverDigest(h hash.Hash, dir string) {
 	data, err := os.ReadFile(filepath.Join(dir, spec.UnifiedFileName))
 	if err != nil {
-		return cachePath, dir + "|" + scope
+		return
 	}
-	h := sha256.Sum256(data)
-	return cachePath, dir + "|" + hex.EncodeToString(h[:]) + "|" + scope
+	var doc struct {
+		Discover spec.DiscoverConfig `yaml:"discover"`
+	}
+	if yaml.Unmarshal(data, &doc) != nil {
+		return
+	}
+	for _, s := range doc.Discover {
+		root := s.Path
+		if !filepath.IsAbs(root) {
+			root = filepath.Join(dir, root)
+		}
+		manifest := s.Manifest
+		if manifest == "" {
+			manifest = spec.UnifiedFileName
+		}
+		dirs, derr := kit.FindEntityDirs(root, manifest, s.Recursive)
+		if derr != nil {
+			continue
+		}
+		sort.Strings(dirs)
+		for _, d := range dirs {
+			if b, rerr := os.ReadFile(filepath.Join(d, manifest)); rerr == nil {
+				_, _ = h.Write([]byte(d))
+				_, _ = h.Write([]byte{0})
+				_, _ = h.Write(b)
+				_, _ = h.Write([]byte{0})
+			}
+		}
+	}
 }
 
 // projectCacheEntry is one cached resolve: the resolved project + its resolution time (RFC3339).
@@ -192,8 +242,12 @@ type projectCacheFile struct {
 	Entries map[string]projectCacheEntry `json:"entries"`
 }
 
-// readProjectCache returns the cached resolved project if fresh for key, else (nil, false). A
-// corrupt or absent file — or one still in the pre-map shape — is a cache miss.
+// readProjectCache returns the cached resolved project for key, else (nil, false). A corrupt or
+// absent file — or one still in the pre-map shape — is a cache miss. There is NO time validity:
+// the key is a CONTENT address over every resolve input (charly.yml + the discovered manifests +
+// the scan scope), so a changed input is a new key -> an immediate miss, and an unchanged input is
+// served however old the entry is (the Docker content-address model). The Resolved stamp is kept
+// for reclamation ordering only.
 func readProjectCache(path, key string) (*spec.ResolvedProject, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -205,10 +259,6 @@ func readProjectCache(path, key string) (*spec.ResolvedProject, bool) {
 	}
 	entry, ok := cf.Entries[key]
 	if !ok {
-		return nil, false
-	}
-	resolved, err := time.Parse(time.RFC3339, entry.Resolved)
-	if err != nil || time.Since(resolved) > projectCacheTTL {
 		return nil, false
 	}
 	return &entry.Project, true
