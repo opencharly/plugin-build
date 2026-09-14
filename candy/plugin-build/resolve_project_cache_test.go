@@ -133,8 +133,20 @@ func TestProjectCacheKeyFailsClosedOnUnreadableManifest(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root — mode 000 is still readable")
 	}
-	if _, key := projectCacheKey(dir, probeReq(dir)); key != "" {
+	path, key := projectCacheKey(dir, probeReq(dir))
+	if key != "" {
 		t.Fatalf("an unreadable manifest must yield an EMPTY key (fail closed), got %q", key)
+	}
+	// The caller contract: read MISSES and write is a no-op, so the un-enumerable
+	// tree resolves fresh and never hits a possibly-stale entry or errors.
+	if _, ok := readProjectCache(path, key); ok {
+		t.Fatal("an empty key must always MISS (never serve a stale entry)")
+	}
+	if err := writeProjectCache(path, key, &spec.ResolvedProject{Version: "v1"}); err != nil {
+		t.Fatalf("writeProjectCache with an empty key must be a no-op, got %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("an empty-key write must not create the cache file (%v)", err)
 	}
 }
 

@@ -267,7 +267,13 @@ type projectCacheFile struct {
 // the scan scope), so a changed input is a new key -> an immediate miss, and an unchanged input is
 // served however old the entry is (the Docker content-address model). The Resolved stamp is kept
 // for reclamation ordering only.
+//
+// FAIL-CLOSED: an empty path or key (the un-enumerable-tree signal from projectCacheKey) is a
+// guaranteed miss, so a non-content-addressable tree can never serve a possibly-stale entry.
 func readProjectCache(path, key string) (*spec.ResolvedProject, bool) {
+	if path == "" || key == "" {
+		return nil, false
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, false
@@ -285,7 +291,13 @@ func readProjectCache(path, key string) (*spec.ResolvedProject, bool) {
 
 // writeProjectCache persists the resolved project under key, KEEPING the other live entries and
 // evicting the oldest once the file exceeds projectCacheEntries (best-effort).
+//
+// FAIL-CLOSED: an empty path or key writes NOTHING (the un-enumerable-tree signal — never create a
+// cache entry a later read could serve without a content address).
 func writeProjectCache(path, key string, rp *spec.ResolvedProject) error {
+	if path == "" || key == "" {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
