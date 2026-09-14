@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +20,6 @@ import (
 	"github.com/opencharly/sdk/kit"
 	"github.com/opencharly/sdk/loaderkit"
 	"github.com/opencharly/spec/spec"
-	"gopkg.in/yaml.v3"
 )
 
 // resolve_project_word.go — the `build:project` word (#55 step3 unit 3b): the PLUGIN-SIDE
@@ -178,54 +178,62 @@ func projectCacheKey(dir string, req spec.ResolvedProjectRequest) (string, strin
 		req.IncludeDisabled, req.LocalSuperproject)
 
 	h := sha256.New()
-	if data, rerr := os.ReadFile(filepath.Join(dir, spec.UnifiedFileName)); rerr == nil {
-		_, _ = h.Write(data)
-	}
-	_, _ = h.Write([]byte{0})
-	discoverDigest(h, dir)
+	projectManifestsDigest(h, dir)
 	return cachePath, dir + "|" + hex.EncodeToString(h.Sum(nil)) + "|" + scope
 }
 
-// discoverDigest folds the CONTENT of every discovered manifest under the project root into the
-// hash — the discover: roots the resolve reads beyond the top-level charly.yml (RCA 2026.257).
-// It parses ONLY the top-level file's discover: block (cheap), then walks each root for its
-// manifest via the shared loader primitive and hashes each manifest file's bytes, in a sorted
-// path order so the digest is stable. A discover-parse failure folds nothing — the top-level
-// charly.yml hash still covers the config, and the resolve's own load will surface any real error.
-func discoverDigest(h hash.Hash, dir string) {
-	data, err := os.ReadFile(filepath.Join(dir, spec.UnifiedFileName))
-	if err != nil {
-		return
-	}
-	var doc struct {
-		Discover spec.DiscoverConfig `yaml:"discover"`
-	}
-	if yaml.Unmarshal(data, &doc) != nil {
-		return
-	}
-	for _, s := range doc.Discover {
-		root := s.Path
-		if !filepath.IsAbs(root) {
-			root = filepath.Join(dir, root)
-		}
-		manifest := s.Manifest
-		if manifest == "" {
-			manifest = spec.UnifiedFileName
-		}
-		dirs, derr := kit.FindEntityDirs(root, manifest, s.Recursive)
-		if derr != nil {
-			continue
-		}
-		sort.Strings(dirs)
-		for _, d := range dirs {
-			if b, rerr := os.ReadFile(filepath.Join(d, manifest)); rerr == nil {
-				_, _ = h.Write([]byte(d))
-				_, _ = h.Write([]byte{0})
-				_, _ = h.Write(b)
-				_, _ = h.Write([]byte{0})
+// projectManifestsDigest folds the CONTENT of every charly.yml manifest under the project root
+// into the hash (RCA 2026.257). The former key hashed ONLY the top-level file, so a manifest that
+// appears or changes in a discover root DURING a run was invisible to it — the eval lane renders a
+// per-PR bed into pr-beds/ mid-run, the first resolve cached a skeleton envelope, and every later
+// resolve was served it ("charly check run: no entity").
+//
+// This is deliberately INTERPRETATION-FREE: it does NOT parse the `discover:` directive or model
+// the resolve's input set. It hashes the raw bytes of every manifest file in the tree (the ONE
+// canonical manifest name, skipping the SAME VCS/build-artifact dirs the discover walk skips via
+// kit.DiscoverSkipDir). That is a SUPERSET of whatever the resolve reads, so it can never
+// under-cover — a divergence in how discover is configured cannot re-open the bug; at worst it
+// over-covers and re-resolves when an unrelated manifest changes (safe, and cheap: measured ~11ms
+// over eval-omarchy's 41 manifests / 319 KB vs the ~11s resolve it guards). Sorted by relative
+// path so the digest is stable.
+func projectManifestsDigest(h hash.Hash, dir string) {
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// a transient per-entry error must not abort the walk; the resolve itself
+			// will surface any real load error. Skip and continue.
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
 			}
+			return nil
 		}
-	}
+		if d.IsDir() {
+			if path != dir && kit.DiscoverSkipDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			// .claude/worktrees hold full project copies — never part of the resolve input
+			// (and skipping them keeps the walk off parallel worktrees).
+			if d.Name() == "worktrees" && filepath.Base(filepath.Dir(path)) == ".claude" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() != spec.UnifiedFileName {
+			return nil
+		}
+		rel, rerr := filepath.Rel(dir, path)
+		if rerr != nil {
+			rel = path
+		}
+		b, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return nil
+		}
+		_, _ = h.Write([]byte(rel))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write(b)
+		_, _ = h.Write([]byte{0})
+		return nil
+	})
 }
 
 // projectCacheEntry is one cached resolve: the resolved project + its resolution time (RFC3339).
