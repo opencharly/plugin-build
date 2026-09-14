@@ -178,29 +178,40 @@ func projectCacheKey(dir string, req spec.ResolvedProjectRequest) (string, strin
 		req.IncludeDisabled, req.LocalSuperproject)
 
 	h := sha256.New()
-	projectManifestsDigest(h, dir)
+	if !projectManifestsDigest(h, dir) {
+		// The manifest set could not be fully enumerated — the tree cannot be
+		// content-addressed, so do NOT cache (an unconditional miss: never read a
+		// possibly-stale entry, never write a digest that omits a manifest).
+		return "", ""
+	}
 	return cachePath, dir + "|" + hex.EncodeToString(h.Sum(nil)) + "|" + scope
 }
 
 // projectManifestsDigest folds the CONTENT of every charly.yml manifest under the project root
 // into the hash (RCA 2026.257). The former key hashed ONLY the top-level file, so a manifest that
-// appears or changes in a discover root DURING a run was invisible to it — the eval lane renders a
-// per-PR bed into pr-beds/ mid-run, the first resolve cached a skeleton envelope, and every later
-// resolve was served it ("charly check run: no entity").
+// appears or changes DURING a run was invisible to it — the eval lane renders a per-PR bed into
+// pr-beds/ mid-run, the first resolve cached a skeleton envelope, and every later resolve was
+// served it ("charly check run: no entity").
 //
-// This is deliberately INTERPRETATION-FREE: it does NOT parse the `discover:` directive or model
-// the resolve's input set. It hashes the raw bytes of every manifest file in the tree (the ONE
-// canonical manifest name, skipping the SAME VCS/build-artifact dirs the discover walk skips via
-// kit.DiscoverSkipDir). That is a SUPERSET of whatever the resolve reads, so it can never
-// under-cover — a divergence in how discover is configured cannot re-open the bug; at worst it
-// over-covers and re-resolves when an unrelated manifest changes (safe, and cheap: measured ~11ms
-// over eval-omarchy's 41 manifests / 319 KB vs the ~11s resolve it guards). Sorted by relative
-// path so the digest is stable.
-func projectManifestsDigest(h hash.Hash, dir string) {
+// INTERPRETATION-FREE: it does NOT parse the `discover:` directive or model the resolve's input
+// set. It hashes the raw bytes of every manifest file in the tree, using the ONE canonical skip
+// rule the discover walk itself uses (kit.DiscoverSkipDir — the same predicate FindEntityDirs
+// applies), so it never applies a rule the resolve does not. It is a superset of the resolve's
+// LOCAL input (the declared discover roots) plus the top-level file; imported remote repos are
+// covered by the top-level file's import pins. Cost is low (measured ~11ms over eval-omarchy's 41
+// manifests / 319 KB, against the ~11s resolve it guards).
+//
+// FAIL-CLOSED: returns false if the tree could not be fully enumerated (a walk/ReadFile error on
+// any entry). The caller then treats the project as un-cacheable and resolves fresh, so a manifest
+// can never be silently dropped from the digest to produce a stale HIT. The walk uses only
+// kit.DiscoverSkipDir — no candy-local path rule.
+func projectManifestsDigest(h hash.Hash, dir string) bool {
+	ok := true
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			// a transient per-entry error must not abort the walk; the resolve itself
-			// will surface any real load error. Skip and continue.
+			// Cannot enumerate this entry/subtree: mark un-cacheable and skip it so
+			// the walk completes, but the digest will not be used.
+			ok = false
 			if d != nil && d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -210,11 +221,6 @@ func projectManifestsDigest(h hash.Hash, dir string) {
 			if path != dir && kit.DiscoverSkipDir(d.Name()) {
 				return filepath.SkipDir
 			}
-			// .claude/worktrees hold full project copies — never part of the resolve input
-			// (and skipping them keeps the walk off parallel worktrees).
-			if d.Name() == "worktrees" && filepath.Base(filepath.Dir(path)) == ".claude" {
-				return filepath.SkipDir
-			}
 			return nil
 		}
 		if d.Name() != spec.UnifiedFileName {
@@ -222,10 +228,14 @@ func projectManifestsDigest(h hash.Hash, dir string) {
 		}
 		rel, rerr := filepath.Rel(dir, path)
 		if rerr != nil {
-			rel = path
+			ok = false
+			return nil
 		}
 		b, rerr := os.ReadFile(path)
 		if rerr != nil {
+			// a manifest the walk located but could not read: un-cacheable, never a
+			// digest that looks like the file was absent.
+			ok = false
 			return nil
 		}
 		_, _ = h.Write([]byte(rel))
@@ -234,6 +244,7 @@ func projectManifestsDigest(h hash.Hash, dir string) {
 		_, _ = h.Write([]byte{0})
 		return nil
 	})
+	return ok
 }
 
 // projectCacheEntry is one cached resolve: the resolved project + its resolution time (RFC3339).

@@ -105,6 +105,39 @@ func TestProjectCacheKeyIncludesDiscoveredManifests(t *testing.T) {
 	}
 }
 
+// TestProjectCacheKeyFailsClosedOnUnreadableManifest proves the fail-closed contract: if the
+// manifest set cannot be fully enumerated, the key is empty, so the caller never reads (or writes)
+// a digest that could omit a manifest and serve a stale HIT.
+func TestProjectCacheKeyFailsClosedOnUnreadableManifest(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CHARLY_DEPLOY_CONFIG", filepath.Join(dir, "deploy.yml"))
+	sub := filepath.Join(dir, "pr-beds", "pr-1")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, spec.UnifiedFileName), []byte("version: 2026.240.1943\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bed := filepath.Join(sub, spec.UnifiedFileName)
+	if err := os.WriteFile(bed, []byte("version: 2026.240.1943\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, key := projectCacheKey(dir, probeReq(dir)); key == "" {
+		t.Fatal("a fully-enumerable tree must produce a key")
+	}
+	// Make the manifest unreadable (mode 000); on a non-root test runner the read fails.
+	if err := os.Chmod(bed, 0o000); err != nil {
+		t.Skip("chmod unsupported")
+	}
+	t.Cleanup(func() { _ = os.Chmod(bed, 0o644) })
+	if os.Geteuid() == 0 {
+		t.Skip("running as root — mode 000 is still readable")
+	}
+	if _, key := projectCacheKey(dir, probeReq(dir)); key != "" {
+		t.Fatalf("an unreadable manifest must yield an EMPTY key (fail closed), got %q", key)
+	}
+}
+
 // writeProbeProject drops a minimal manifest so projectCacheKey hashes real content rather than
 // taking its read-error branch.
 func writeProbeProject(t *testing.T) string {
