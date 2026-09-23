@@ -110,6 +110,7 @@ func TestProjectCacheKeyIncludesDiscoveredManifests(t *testing.T) {
 func TestProjectCacheKeyFailsClosedOnUnreadableManifest(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CHARLY_DEPLOY_CONFIG", filepath.Join(dir, "deploy.yml"))
+	t.Setenv("CHARLY_CACHE_DIR", t.TempDir())
 	sub := filepath.Join(dir, "pr-beds", "pr-1")
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)

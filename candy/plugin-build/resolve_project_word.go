@@ -55,10 +55,11 @@ func resolveProjectEnvelope(ctx context.Context, ex *sdk.Executor, req spec.Reso
 	// Persistent cache: the project load (LoadUnified over the full import
 	// closure) is the dominant cost of `charly status` (measured ~4.4s + GC
 	// pressure per load, and the status fan-out loads it once per collector).
-	// The project does not change often — only an edit to charly.yml or its
-	// imports mutates it — so the first call after the TTL expires re-fetches
-	// with user feedback and every subsequent call within the TTL reads the
-	// cache. The LIVE container state (podman ps) is never cached.
+	// The key is a CONTENT address over every resolve input (charly.yml + the
+	// discovered manifests + the scan scope), so there is NO time validity: an
+	// unchanged project is served however old the entry is, and a changed input
+	// is a new key -> an immediate miss that re-fetches with user feedback. The
+	// LIVE container state (podman ps) is never cached.
 	cacheStore, key := projectCacheKey(dir, req)
 	if key != "" {
 		if rp, ok := readProjectCache(cacheStore, key); ok {
