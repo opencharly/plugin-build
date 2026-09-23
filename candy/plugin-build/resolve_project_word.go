@@ -13,12 +13,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/buildkit"
 	"github.com/opencharly/sdk/kit"
 	"github.com/opencharly/sdk/loaderkit"
+	"github.com/opencharly/spec/cache"
 	"github.com/opencharly/spec/spec"
 )
 
@@ -59,9 +59,9 @@ func resolveProjectEnvelope(ctx context.Context, ex *sdk.Executor, req spec.Reso
 	// imports mutates it — so the first call after the TTL expires re-fetches
 	// with user feedback and every subsequent call within the TTL reads the
 	// cache. The LIVE container state (podman ps) is never cached.
-	cachePath, key := projectCacheKey(dir, req)
-	if cachePath != "" {
-		if rp, ok := readProjectCache(cachePath, key); ok {
+	cacheStore, key := projectCacheKey(dir, req)
+	if key != "" {
+		if rp, ok := readProjectCache(cacheStore, key); ok {
 			return *rp, nil
 		}
 	}
@@ -123,8 +123,8 @@ func resolveProjectEnvelope(ctx context.Context, ex *sdk.Executor, req spec.Reso
 	// HostBuild leg via loaderkit.LoaderThreadedViaExecutor (no new seam).
 	rp.Primaries = loaderkit.LoaderThreadedViaExecutor(ctx, ex).Primaries
 
-	if cachePath != "" {
-		_ = writeProjectCache(cachePath, key, rp)
+	if key != "" {
+		_ = writeProjectCache(cacheStore, key, rp)
 	}
 	return *rp, nil
 }
@@ -134,7 +134,7 @@ func resolveProjectEnvelope(ctx context.Context, ex *sdk.Executor, req spec.Reso
 // plus one per add_candy: ref a deploy compiles. A handful covers that; the oldest is evicted.
 const projectCacheEntries = 16
 
-// projectCacheKey returns the resolved-project cache file + a content key over EVERY input the
+// projectCacheKey returns the resolved-project cache STORE + a content key over EVERY input the
 // resolve consumes: (1) the top-level charly.yml bytes, (2) the CONTENT of every discovered
 // manifest (the discover: roots), (3) the request's scan-widening scope, and (4) the project dir.
 //
@@ -160,12 +160,12 @@ const projectCacheEntries = 16
 //
 // LocalSuperproject belongs here for the same reason: it applies a CHARLY_REPO_OVERRIDE around the
 // resolve, so it decides whether refs resolve from the local superproject or from the fetch cache.
-func projectCacheKey(dir string, req spec.ResolvedProjectRequest) (string, string) {
-	cfg, err := spec.DefaultDeployConfigPath()
-	if err != nil {
-		return "", ""
-	}
-	cachePath := filepath.Join(filepath.Dir(cfg), "cache", "project.json")
+//
+// The cache is the shared `spec/cache` ArtifactStore (an OCI Image Layout, spec#148), so every
+// resolved-project entry is a content-addressed manifest and the store's own prune bounds it. An
+// inert store (no config dir) yields an empty key, so the caller never caches.
+func projectCacheKey(dir string, req spec.ResolvedProjectRequest) (*cache.Layout, string) {
+	store := openProjectCacheStore()
 
 	// Sorted before joining: the same scope requested in a different ORDER is the same scan, and
 	// must hit the same entry rather than resolving the whole project a second time.
@@ -182,9 +182,20 @@ func projectCacheKey(dir string, req spec.ResolvedProjectRequest) (string, strin
 		// The manifest set could not be fully enumerated — the tree cannot be
 		// content-addressed, so do NOT cache (an unconditional miss: never read a
 		// possibly-stale entry, never write a digest that omits a manifest).
-		return "", ""
+		return store, ""
 	}
-	return cachePath, dir + "|" + hex.EncodeToString(h.Sum(nil)) + "|" + scope
+	return store, dir + "|" + hex.EncodeToString(h.Sum(nil)) + "|" + scope
+}
+
+// openProjectCacheStore opens the shared named `project` ArtifactStore, bounded to
+// projectCacheEntries. An unresolvable cache dir yields an inert store (every lookup a miss, every
+// write a no-op).
+func openProjectCacheStore() *cache.Layout {
+	dir, err := cache.StoreDir("project")
+	if err != nil {
+		return cache.OpenLayout("")
+	}
+	return cache.OpenLayoutLimited(dir, projectCacheEntries)
 }
 
 // projectManifestsDigest folds the CONTENT of every charly.yml manifest under the project root
@@ -247,100 +258,45 @@ func projectManifestsDigest(h hash.Hash, dir string) bool {
 	return ok
 }
 
-// projectCacheEntry is one cached resolve: the resolved project + its resolution time (RFC3339).
-type projectCacheEntry struct {
-	Resolved string               `json:"resolved"`
-	Project  spec.ResolvedProject `json:"project"`
-}
-
-// projectCacheFile is the on-disk cache shape: entries keyed by the content key. A MAP rather than
-// the single slot it replaces — the key now carries the request's scan scope, so a deploy that
-// compiles several add_candy refs holds several live keys, and a single slot would make each one
-// evict the last and re-resolve the entire project every time.
-type projectCacheFile struct {
-	Entries map[string]projectCacheEntry `json:"entries"`
-}
-
 // readProjectCache returns the cached resolved project for key, else (nil, false). A corrupt or
-// absent file — or one still in the pre-map shape — is a cache miss. There is NO time validity:
-// the key is a CONTENT address over every resolve input (charly.yml + the discovered manifests +
-// the scan scope), so a changed input is a new key -> an immediate miss, and an unchanged input is
-// served however old the entry is (the Docker content-address model). The Resolved stamp is kept
-// for reclamation ordering only.
+// absent entry is a cache miss. There is NO time validity: the key is a CONTENT address over every
+// resolve input (charly.yml + the discovered manifests + the scan scope), so a changed input is a
+// new key -> an immediate miss, and an unchanged input is served however old the entry is (the
+// Docker content-address model). The ArtifactStore's entry Resolved stamp is kept for reclamation
+// ordering only.
 //
-// FAIL-CLOSED: an empty path or key (the un-enumerable-tree signal from projectCacheKey) is a
-// guaranteed miss, so a non-content-addressable tree can never serve a possibly-stale entry.
-func readProjectCache(path, key string) (*spec.ResolvedProject, bool) {
-	if path == "" || key == "" {
+// FAIL-CLOSED: an empty key (the un-enumerable-tree signal from projectCacheKey) is a guaranteed
+// miss, so a non-content-addressable tree can never serve a possibly-stale entry.
+func readProjectCache(store *cache.Layout, key string) (*spec.ResolvedProject, bool) {
+	if store == nil || key == "" {
 		return nil, false
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, false
-	}
-	var cf projectCacheFile
-	if json.Unmarshal(data, &cf) != nil {
-		return nil, false
-	}
-	entry, ok := cf.Entries[key]
+	e, ok := store.Get(key)
 	if !ok {
 		return nil, false
 	}
-	return &entry.Project, true
+	var rp spec.ResolvedProject
+	if !e.Decode(&rp) {
+		return nil, false
+	}
+	return &rp, true
 }
 
-// writeProjectCache persists the resolved project under key, KEEPING the other live entries and
-// evicting the oldest once the file exceeds projectCacheEntries (best-effort).
+// writeProjectCache persists the resolved project under key (best-effort). The ArtifactStore's own
+// bounded prune (OpenLayoutLimited) evicts the oldest entries — the key carries the scan scope, so
+// one project legitimately holds several live entries at once.
 //
-// FAIL-CLOSED: an empty path or key writes NOTHING (the un-enumerable-tree signal — never create a
-// cache entry a later read could serve without a content address).
-func writeProjectCache(path, key string, rp *spec.ResolvedProject) error {
-	if path == "" || key == "" {
+// FAIL-CLOSED: an empty key writes NOTHING (the un-enumerable-tree signal — never create a cache
+// entry a later read could serve without a content address).
+func writeProjectCache(store *cache.Layout, key string, rp *spec.ResolvedProject) error {
+	if store == nil || key == "" {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	cf := projectCacheFile{Entries: map[string]projectCacheEntry{}}
-	if existing, err := os.ReadFile(path); err == nil {
-		var prev projectCacheFile
-		if json.Unmarshal(existing, &prev) == nil && prev.Entries != nil {
-			cf.Entries = prev.Entries
-		}
-	}
-	cf.Entries[key] = projectCacheEntry{
-		Resolved: time.Now().UTC().Format(time.RFC3339),
-		Project:  *rp,
-	}
-	evictOldestProjectCacheEntries(cf.Entries, projectCacheEntries)
-	data, err := json.Marshal(cf)
+	raw, err := json.Marshal(*rp)
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
-// evictOldestProjectCacheEntries trims entries to at most max, dropping the oldest first. An
-// unparseable timestamp sorts oldest, so a corrupt entry is evicted before a good one.
-func evictOldestProjectCacheEntries(entries map[string]projectCacheEntry, max int) {
-	for len(entries) > max {
-		oldestKey := ""
-		var oldest time.Time
-		for k, entry := range entries {
-			t, err := time.Parse(time.RFC3339, entry.Resolved)
-			if err != nil {
-				t = time.Time{}
-			}
-			if oldestKey == "" || t.Before(oldest) {
-				oldestKey, oldest = k, t
-			}
-		}
-		delete(entries, oldestKey)
-	}
+	return store.Put(key, cache.Entry{Payload: raw})
 }
 
 // applySelfSuperprojectOverridePlugin is the plugin-side, pure reproduction of charly core's

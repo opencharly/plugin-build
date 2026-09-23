@@ -1,12 +1,13 @@
 package build
 
 import (
-	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/opencharly/spec/cache"
 	"github.com/opencharly/spec/spec"
 )
 
@@ -20,14 +21,13 @@ func probeReq(dir string) spec.ResolvedProjectRequest {
 
 func TestProjectCacheRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	cfg := filepath.Join(dir, "charly.yml")
-	t.Setenv("CHARLY_DEPLOY_CONFIG", cfg)
-	path, key := projectCacheKey(dir, probeReq(dir))
+	t.Setenv("CHARLY_CACHE_DIR", t.TempDir())
+	store, key := projectCacheKey(dir, probeReq(dir))
 	rp := &spec.ResolvedProject{Version: "2026.240.1943"}
-	if err := writeProjectCache(path, key, rp); err != nil {
+	if err := writeProjectCache(store, key, rp); err != nil {
 		t.Fatalf("writeProjectCache: %v", err)
 	}
-	got, ok := readProjectCache(path, key)
+	got, ok := readProjectCache(store, key)
 	if !ok {
 		t.Fatal("readProjectCache: cache miss after write")
 	}
@@ -35,7 +35,7 @@ func TestProjectCacheRoundTrip(t *testing.T) {
 		t.Fatalf("readProjectCache: got %+v", got)
 	}
 	// A different key is a cache miss.
-	if _, ok := readProjectCache(path, "other"); ok {
+	if _, ok := readProjectCache(store, "other"); ok {
 		t.Fatal("readProjectCache: different key should miss")
 	}
 }
@@ -44,22 +44,21 @@ func TestProjectCacheRoundTrip(t *testing.T) {
 // A very old entry is served while its key is present; only a CHANGED input (a new key) misses.
 func TestProjectCacheServedRegardlessOfAge(t *testing.T) {
 	dir := t.TempDir()
-	cfg := filepath.Join(dir, "charly.yml")
-	t.Setenv("CHARLY_DEPLOY_CONFIG", cfg)
-	path, key := projectCacheKey(dir, probeReq(dir))
-	if err := writeProjectCache(path, key, &spec.ResolvedProject{Version: "v1"}); err != nil {
+	t.Setenv("CHARLY_CACHE_DIR", t.TempDir())
+	store, key := projectCacheKey(dir, probeReq(dir))
+	if err := writeProjectCache(store, key, &spec.ResolvedProject{Version: "v1"}); err != nil {
 		t.Fatal(err)
 	}
 	// Backdate the RECLAMATION stamp by a year; the entry must still be served.
-	data, _ := os.ReadFile(path)
-	var cf projectCacheFile
-	_ = json.Unmarshal(data, &cf)
-	entry := cf.Entries[key]
-	entry.Resolved = time.Now().AddDate(-1, 0, 0).UTC().Format(time.RFC3339)
-	cf.Entries[key] = entry
-	out, _ := json.Marshal(cf)
-	_ = os.WriteFile(path, out, 0o644)
-	if _, ok := readProjectCache(path, key); !ok {
+	e, ok := store.Get(key)
+	if !ok {
+		t.Fatal("entry missing after write")
+	}
+	e.Resolved = time.Now().AddDate(-1, 0, 0)
+	if err := store.PutEntry(key, e); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readProjectCache(store, key); !ok {
 		t.Fatal("a present key must be served regardless of age (no TTL)")
 	}
 }
@@ -133,20 +132,20 @@ func TestProjectCacheKeyFailsClosedOnUnreadableManifest(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root — mode 000 is still readable")
 	}
-	path, key := projectCacheKey(dir, probeReq(dir))
+	store, key := projectCacheKey(dir, probeReq(dir))
 	if key != "" {
 		t.Fatalf("an unreadable manifest must yield an EMPTY key (fail closed), got %q", key)
 	}
 	// The caller contract: read MISSES and write is a no-op, so the un-enumerable
 	// tree resolves fresh and never hits a possibly-stale entry or errors.
-	if _, ok := readProjectCache(path, key); ok {
+	if _, ok := readProjectCache(store, key); ok {
 		t.Fatal("an empty key must always MISS (never serve a stale entry)")
 	}
-	if err := writeProjectCache(path, key, &spec.ResolvedProject{Version: "v1"}); err != nil {
+	if err := writeProjectCache(store, key, &spec.ResolvedProject{Version: "v1"}); err != nil {
 		t.Fatalf("writeProjectCache with an empty key must be a no-op, got %v", err)
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("an empty-key write must not create the cache file (%v)", err)
+	if store.Len() != 0 {
+		t.Fatalf("an empty-key write must not create a cache entry (len=%d)", store.Len())
 	}
 }
 
@@ -215,44 +214,55 @@ func TestProjectCacheKeyOrderIndependent(t *testing.T) {
 // deploy compiling several add_candy refs must not have each write evict the last, or every ref
 // after the first re-resolves the entire project.
 func TestProjectCacheHoldsConcurrentScopes(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "project.json")
+	t.Setenv("CHARLY_CACHE_DIR", t.TempDir())
+	store := openProjectCacheStore()
 	unwidened := &spec.ResolvedProject{Candies: map[string]spec.CandyView{"plugin-wl": {}}}
 	widened := &spec.ResolvedProject{Candies: map[string]spec.CandyView{"plugin-wl": {}, "plugin-quickshell": {}}}
 
-	if err := writeProjectCache(path, "scope-unwidened", unwidened); err != nil {
+	if err := writeProjectCache(store, "scope-unwidened", unwidened); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeProjectCache(path, "scope-widened", widened); err != nil {
+	if err := writeProjectCache(store, "scope-widened", widened); err != nil {
 		t.Fatal(err)
 	}
 
-	got, ok := readProjectCache(path, "scope-widened")
+	got, ok := readProjectCache(store, "scope-widened")
 	if !ok {
 		t.Fatal("the widened entry was evicted by the unwidened write")
 	}
 	if _, has := got.Candies["plugin-quickshell"]; !has {
 		t.Error("the widened entry lost its add_candy-only candy")
 	}
-	if got, ok := readProjectCache(path, "scope-unwidened"); !ok || len(got.Candies) != 1 {
+	if got, ok := readProjectCache(store, "scope-unwidened"); !ok || len(got.Candies) != 1 {
 		t.Error("the unwidened entry did not survive the widened write")
 	}
-	if _, ok := readProjectCache(path, "scope-never-written"); ok {
+	if _, ok := readProjectCache(store, "scope-never-written"); ok {
 		t.Error("an unknown scope was served a cached envelope")
 	}
 }
 
-// TestProjectCacheEvictsOldest keeps the file bounded.
+// TestProjectCacheEvictsOldest proves the store stays bounded: the ArtifactStore's own
+// OpenLayoutLimited prune reclaims the oldest entry beyond projectCacheEntries.
 func TestProjectCacheEvictsOldest(t *testing.T) {
-	entries := map[string]projectCacheEntry{
-		"old":    {Resolved: "2020-01-01T00:00:00Z"},
-		"newer":  {Resolved: "2026-01-01T00:00:00Z"},
-		"newest": {Resolved: "2026-06-01T00:00:00Z"},
+	t.Setenv("CHARLY_CACHE_DIR", t.TempDir())
+	store := cache.OpenLayoutLimited(t.TempDir(), projectCacheEntries)
+	base := time.Now().Add(-time.Hour)
+	// Write projectCacheEntries+2 entries with ascending resolution times.
+	keys := make([]string, 0, projectCacheEntries+2)
+	for i := 0; i < projectCacheEntries+2; i++ {
+		k := fmt.Sprintf("scope-%02d", i)
+		keys = append(keys, k)
+		if err := store.PutEntry(k, cache.Entry{Payload: []byte(`{}`), Resolved: base.Add(time.Duration(i) * time.Minute)}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	evictOldestProjectCacheEntries(entries, 2)
-	if len(entries) != 2 {
-		t.Fatalf("want 2 entries, got %d", len(entries))
+	if store.Len() > projectCacheEntries {
+		t.Fatalf("store holds %d entries, want <= %d", store.Len(), projectCacheEntries)
 	}
-	if _, ok := entries["old"]; ok {
-		t.Error("evicted the wrong entry — the oldest must go first")
+	if _, ok := store.Get(keys[0]); ok {
+		t.Error("the oldest entry must be reclaimed")
+	}
+	if _, ok := store.Get(keys[len(keys)-1]); !ok {
+		t.Error("the newest entry must survive")
 	}
 }
