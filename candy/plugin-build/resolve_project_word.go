@@ -164,7 +164,8 @@ const projectCacheEntries = 16
 //
 // The cache is the shared `spec/cache` ArtifactStore (an OCI Image Layout, spec#148), so every
 // resolved-project entry is a content-addressed manifest and the store's own prune bounds it. An
-// inert store (no config dir) yields an empty key, so the caller never caches.
+// inert store (no config dir) makes every read a miss and every write a no-op, so the caller never
+// caches.
 func projectCacheKey(dir string, req spec.ResolvedProjectRequest) (*cache.Layout, string) {
 	store := openProjectCacheStore()
 
