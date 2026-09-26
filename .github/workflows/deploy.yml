@@ -22,7 +22,7 @@ jobs:
 
       - name: Fetch the pinned charly source (CI-time temp checkout)
         run: |
-          git clone --depth 1 --branch v2026.238.1242 https://github.com/opencharly/charly.git /tmp/charly
+          git clone --depth 1 --branch v2026.269.0556 https://github.com/opencharly/charly.git /tmp/charly
 
       - uses: actions/setup-go@v5
         with:
