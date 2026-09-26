@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/opencharly/sdk/buildkit"
 	"github.com/opencharly/spec/spec"
 )
 
@@ -94,4 +95,37 @@ func ciCountLine(s, want string) int {
 		}
 	}
 	return n
+}
+
+// TestCleanStaleBuildDirs_PreservesConcurrentBedsBoxDirs is the RCA regression for the
+// roster image-build race: a concurrent bed's in-progress .build/<box> dir must NOT be
+// removed just because it is absent from THIS build's scoped `resolved` set. Only a dir
+// whose name resolves to no box anywhere in the config is stale. The former behavior
+// deleted a sibling bed's dir mid-COPY, failing its `podman build` exit 125.
+func TestCleanStaleBuildDirs_PreservesConcurrentBedsBoxDirs(t *testing.T) {
+	dir := t.TempDir()
+	buildDir := filepath.Join(dir, ".build")
+	if err := os.MkdirAll(filepath.Join(buildDir, "charly.docs-site-app"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(buildDir, "truly-gone-box"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// cfg knows a namespaced box `charly.docs-site-app` but NOT `truly-gone-box`.
+	cfg := &spec.Config{
+		Box:        boxMapOfFixture(map[string]spec.BoxConfig{"local-box": {Candy: []string{}}}),
+		Namespaces: map[string]*spec.Config{"charly": {Box: boxMapOfFixture(map[string]spec.BoxConfig{"docs-site-app": {Candy: []string{}}})}},
+	}
+	// `resolved` is THIS build's scoped closure: neither sibling dir is in it.
+	resolved := map[string]*buildkit.ResolvedBox{"local-box": {}}
+
+	if err := cleanStaleBuildDirs(buildDir, resolved, cfg); err != nil {
+		t.Fatalf("cleanStaleBuildDirs: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(buildDir, "charly.docs-site-app")); err != nil {
+		t.Fatalf("a concurrent bed's box dir was removed (regression): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(buildDir, "truly-gone-box")); !os.IsNotExist(err) {
+		t.Fatal("a genuinely-stale dir was not removed")
+	}
 }

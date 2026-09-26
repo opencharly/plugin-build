@@ -83,10 +83,12 @@ func writeContextIgnore(dir string, cfg *spec.Config, baseline []string) error {
 	return nil
 }
 
-// cleanStaleBuildDirs removes image directories in .build/ that don't correspond to any enabled
-// image, and removes leftover files like docker-bake.hcl. Byte-identical to the former
-// charly/generate.go (*Generator).cleanStaleBuildDirs.
-func cleanStaleBuildDirs(buildDir string, boxes map[string]*buildkit.ResolvedBox) error {
+// cleanStaleBuildDirs removes image directories in .build/ that correspond to NO box in the
+// project (any namespace), and removes leftover files like docker-bake.hcl. Relocated from the
+// former charly/generate.go (*Generator).cleanStaleBuildDirs, with ONE behavioural addition: a dir
+// absent from THIS build's scoped `boxes` set is preserved when it names an enabled box anywhere
+// in `cfg` (a concurrent bed in the same process owns it) — see the guard below.
+func cleanStaleBuildDirs(buildDir string, boxes map[string]*buildkit.ResolvedBox, cfg *spec.Config) error {
 	entries, err := os.ReadDir(buildDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -104,6 +106,16 @@ func cleanStaleBuildDirs(buildDir string, boxes map[string]*buildkit.ResolvedBox
 				continue
 			}
 			if _, exists := boxes[name]; !exists {
+				// A dir absent from THIS scoped build's closure is NOT stale: a CONCURRENT
+				// build in the same process (a roster running beds as goroutines sharing one
+				// .build/) owns its OWN dir here; deleting it mid-COPY fails the peer's podman
+				// build exit 125. Only a name resolving to NO box anywhere in the config is
+				// genuinely stale.
+				if cfg != nil {
+					if _, _, ok := cfg.ResolveBoxRef(name); ok {
+						continue
+					}
+				}
 				path := filepath.Join(buildDir, name)
 				if err := os.RemoveAll(path); err != nil {
 					return fmt.Errorf("removing stale dir %s: %w", path, err)
@@ -237,7 +249,7 @@ func ensureCharlyBinaryFresh(dir string, boxes map[string]*buildkit.ResolvedBox,
 // (clean → mkdir → context-ignore → remote-candy-copies → ensureCharlyBinaryFresh), replacing the
 // prepLeg HostBuild round-trip's FS-prep half.
 func runHostFSPrep(ctx context.Context, ex *sdk.Executor, dir, buildDir string, cfg *spec.Config, layers map[string]spec.CandyReader, resolved map[string]*buildkit.ResolvedBox, boxes []string, generateOnly bool) error {
-	if err := cleanStaleBuildDirs(buildDir, resolved); err != nil {
+	if err := cleanStaleBuildDirs(buildDir, resolved, cfg); err != nil {
 		return fmt.Errorf("cleaning stale build dirs: %w", err)
 	}
 	if err := os.MkdirAll(buildDir, 0755); err != nil {
