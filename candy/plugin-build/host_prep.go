@@ -83,9 +83,11 @@ func writeContextIgnore(dir string, cfg *spec.Config, baseline []string) error {
 	return nil
 }
 
-// cleanStaleBuildDirs removes image directories in .build/ that don't correspond to any enabled
-// image, and removes leftover files like docker-bake.hcl. Byte-identical to the former
-// charly/generate.go (*Generator).cleanStaleBuildDirs.
+// cleanStaleBuildDirs removes image directories in .build/ that correspond to NO box in the
+// project (any namespace), and removes leftover files like docker-bake.hcl. Relocated from the
+// former charly/generate.go (*Generator).cleanStaleBuildDirs, with ONE behavioural addition: a dir
+// absent from THIS build's scoped `boxes` set is preserved when it names an enabled box anywhere
+// in `cfg` (a concurrent bed in the same process owns it) — see the guard below.
 func cleanStaleBuildDirs(buildDir string, boxes map[string]*buildkit.ResolvedBox, cfg *spec.Config) error {
 	entries, err := os.ReadDir(buildDir)
 	if err != nil {
