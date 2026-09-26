@@ -257,16 +257,20 @@ func namespaceScanSeams(ctx context.Context, ex *sdk.Executor, downloads []spec.
 
 // --- validate + prep legs ---
 
-// validateProjectLeg runs the pre-build validation GATE via InvokeProvider(command:validate) — the
+// validateProjectLeg runs the pre-build validation GATE via InvokeProvider(command:validate:box) — the
 // plugin↔plugin form of the former host-side gate (whose comment named exit "K3"). Core carries no
 // production copy of this dispatch any more; the only remaining one is the fixture-test harness in
 // charly/validate_dispatch_test.go, which mirrors this function deliberately.
+//
+// The target names its PARENT (`box`): validate is a NESTED command capability
+// (command:validate:box), and a nested command is never reachable by its bare word — the peer
+// dispatch carries the full identity exactly as the CLI grammar and the provider registry key do.
 func validateProjectLeg(ctx context.Context, ex *sdk.Executor, rr spec.ResolvedProjectRequest) error {
 	params, err := json.Marshal(spec.ValidateProjectRequest{Dir: rr.Dir, IncludeDisabled: rr.IncludeDisabled})
 	if err != nil {
 		return err
 	}
-	res, err := ex.InvokeProvider(ctx, "command", "validate", sdk.OpValidate, params, nil, sdk.InvokeProviderOpts{})
+	res, err := ex.InvokeProvider(ctx, "command", "validate", sdk.OpValidate, params, nil, sdk.InvokeProviderOpts{CommandParent: "box"})
 	if err != nil {
 		return err
 	}
