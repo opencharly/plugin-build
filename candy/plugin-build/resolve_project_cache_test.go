@@ -23,7 +23,7 @@ func TestProjectCacheRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CHARLY_CACHE_DIR", t.TempDir())
 	store, key := projectCacheKey(dir, probeReq(dir))
-	rp := &spec.ResolvedProject{Version: "2026.240.1943"}
+	rp := &spec.ResolvedProject{Candies: map[string]spec.CandyView{"probe": {}}}
 	if err := writeProjectCache(store, key, rp); err != nil {
 		t.Fatalf("writeProjectCache: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestProjectCacheRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("readProjectCache: cache miss after write")
 	}
-	if got.Version != "2026.240.1943" {
+	if _, has := got.Candies["probe"]; !has {
 		t.Fatalf("readProjectCache: got %+v", got)
 	}
 	// A different key is a cache miss.
@@ -46,7 +46,7 @@ func TestProjectCacheServedRegardlessOfAge(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CHARLY_CACHE_DIR", t.TempDir())
 	store, key := projectCacheKey(dir, probeReq(dir))
-	if err := writeProjectCache(store, key, &spec.ResolvedProject{Version: "v1"}); err != nil {
+	if err := writeProjectCache(store, key, &spec.ResolvedProject{Candies: map[string]spec.CandyView{"v1": {}}}); err != nil {
 		t.Fatal(err)
 	}
 	// Backdate the RECLAMATION stamp by a year; the entry must still be served.
@@ -142,7 +142,7 @@ func TestProjectCacheKeyFailsClosedOnUnreadableManifest(t *testing.T) {
 	if _, ok := readProjectCache(store, key); ok {
 		t.Fatal("an empty key must always MISS (never serve a stale entry)")
 	}
-	if err := writeProjectCache(store, key, &spec.ResolvedProject{Version: "v1"}); err != nil {
+	if err := writeProjectCache(store, key, &spec.ResolvedProject{Candies: map[string]spec.CandyView{"v1": {}}}); err != nil {
 		t.Fatalf("writeProjectCache with an empty key must be a no-op, got %v", err)
 	}
 	if store.Len() != 0 {

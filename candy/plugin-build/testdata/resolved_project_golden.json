@@ -1,9 +1,7 @@
 {
-  "version": "2026.100.0000",
   "boxes": {
     "demo": {
       "name": "demo",
-      "version": "2026.100.0001",
       "effective_version": "2026.100.0002",
       "status": "working",
       "info": "a demo box",

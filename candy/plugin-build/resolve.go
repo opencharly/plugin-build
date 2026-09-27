@@ -41,7 +41,7 @@ import (
 //                                     longer has any reader.
 //
 // Everything else — buildkit.ResolveAllBox / deploykit.ComputeIntermediates / GlobalCandyOrder /
-// ComputeEffectiveVersions / RenderPrepAll / ResolveBoxOrder / ResolveBoxLevels / the drive-model
+// RenderPrepAll / ResolveBoxOrder / ResolveBoxLevels / the drive-model
 // (engine/platform/descriptors/tunables) / loaderkit.ProjectResolvedProject — is PURE sdk the plugin
 // runs directly, so the resolve ORCHESTRATION + the drive-model computation leave charly core. The
 // render DRIVE (render.go) already reads the envelope this produces (#67). This REPLACES the host
@@ -142,7 +142,7 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 	if err != nil {
 		return spec.BuildResolveReply{Error: errString(err)}, nil
 	}
-	// auto-intermediates + global candy order + effective versions (pure sdk).
+	// auto-intermediates + global candy order (pure sdk).
 	resolved, err = deploykit.ComputeIntermediates(resolved, layers, intermediateDefaults(cfg), tag)
 	if err != nil {
 		return spec.BuildResolveReply{Error: errString(fmt.Errorf("computing intermediates: %w", err))}, nil
@@ -150,9 +150,6 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 	globalOrder, err := deploykit.GlobalCandyOrder(resolved, layers)
 	if err != nil {
 		return spec.BuildResolveReply{Error: errString(fmt.Errorf("computing global candy order: %w", err))}, nil
-	}
-	if err := deploykit.ComputeEffectiveVersions(resolved, layers); err != nil {
-		return spec.BuildResolveReply{Error: errString(err)}, nil
 	}
 
 	// --- 7. host-fs PREP (plugin-side, pure — K3 host-prep move) ---
