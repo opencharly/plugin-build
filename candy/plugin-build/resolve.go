@@ -41,7 +41,7 @@ import (
 //                                     longer has any reader.
 //
 // Everything else — buildkit.ResolveAllBox / deploykit.ComputeIntermediates / GlobalCandyOrder /
-// ComputeEffectiveVersions / RenderPrepAll / ResolveBoxOrder / ResolveBoxLevels / the drive-model
+// RenderPrepAll / ResolveBoxOrder / ResolveBoxLevels / the drive-model
 // (engine/platform/descriptors/tunables) / loaderkit.ProjectResolvedProject — is PURE sdk the plugin
 // runs directly, so the resolve ORCHESTRATION + the drive-model computation leave charly core. The
 // render DRIVE (render.go) already reads the envelope this produces (#67). This REPLACES the host
@@ -142,7 +142,7 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 	if err != nil {
 		return spec.BuildResolveReply{Error: errString(err)}, nil
 	}
-	// auto-intermediates + global candy order + effective versions (pure sdk).
+	// auto-intermediates + global candy order (pure sdk).
 	resolved, err = deploykit.ComputeIntermediates(resolved, layers, intermediateDefaults(cfg), tag)
 	if err != nil {
 		return spec.BuildResolveReply{Error: errString(fmt.Errorf("computing intermediates: %w", err))}, nil
@@ -151,9 +151,12 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 	if err != nil {
 		return spec.BuildResolveReply{Error: errString(fmt.Errorf("computing global candy order: %w", err))}, nil
 	}
-	if err := deploykit.ComputeEffectiveVersions(resolved, layers); err != nil {
-		return spec.BuildResolveReply{Error: errString(err)}, nil
-	}
+	// The effective-version computation (deploykit.ComputeEffectiveVersions) was DELETED by the
+	// schema-versioning removal (sdk#313): it was the SOLE writer of ResolvedBox.EffectiveVersion on
+	// the resolve path, and the ai.opencharly.version OCI label is no longer emitted anywhere
+	// (generate.go / write_labels.go / vm_box_emit.go / render_prep.go all drop it). The field is
+	// therefore intentionally left unset here — images are identified by ai.opencharly.box — and no
+	// code in this plugin reads it. There is no replacement call.
 
 	// --- 7. host-fs PREP (plugin-side, pure — K3 host-prep move) ---
 	// The FS prep (cleanStaleBuildDirs / writeContextIgnore / createRemoteCandyCopies /

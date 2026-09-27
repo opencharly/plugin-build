@@ -15,8 +15,7 @@ import (
 
 // imageTags computes the tags for an image. charly is CalVer-only — it never emits `:latest`.
 // Every built image carries exactly its CalVer tag (box.FullTag, e.g.
-// `ghcr.io/opencharly/fedora:2026.114.1042`); short-name resolution goes through the
-// `ai.opencharly.version` OCI label host-side.
+// `ghcr.io/opencharly/fedora:2026.114.1042`).
 func imageTags(box spec.BuildResolveBox) []string {
 	return []string{box.FullTag}
 }
