@@ -1,6 +1,11 @@
 package build
 
 import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"strings"
 	"testing"
 
 	"github.com/opencharly/sdk/buildkit"
@@ -8,16 +13,67 @@ import (
 	"github.com/opencharly/spec/spec"
 )
 
-// TestResolvePipeline_LeavesEffectiveVersionUnset is the post-schema-versioning coverage for the
-// removal of `deploykit.ComputeEffectiveVersions` (sdk#313). The resolve pipeline `resolveBuildEngine`
-// drives — `buildkit.ResolveAllBox` → `deploykit.ComputeIntermediates` → `deploykit.GlobalCandyOrder`
-// — MUST leave `spec.ResolvedBox.EffectiveVersion` unset on every box, because the field's only
-// writer was the deleted `ComputeEffectiveVersions` and the `ai.opencharly.version` OCI label is no
-// longer emitted anywhere. This test FAILS if any step in that chain starts populating the field
-// again (e.g. a re-introduced effective-version computation), which is exactly the behaviour the
-// removal changed. It deliberately does NOT use `fullResolvedBoxFixture` / the byte-stable golden:
-// those hardcode `EffectiveVersion` for the wire-projection completeness assertion and so cannot say
-// anything about what the resolve path does.
+// TestResolveBuildEngine_DoesNotPopulateEffectiveVersion is the coverage that asserts AGAINST THE
+// CHANGED FUNCTION. It parses `resolve.go` and walks the body of `resolveBuildEngine` — the function
+// this PR edits — and FAILS if it (a) calls `ComputeEffectiveVersions` or (b) assigns any
+// `.EffectiveVersion` field. `deploykit.ComputeEffectiveVersions` was the sole writer of
+// `ResolvedBox.EffectiveVersion` on the resolve path and was deleted by sdk#313; re-introducing a
+// population step here turns this test red. (The deleted symbol no longer exists in the merged sdk,
+// so a re-introduction would also fail to compile — this test guards the plugin-owned call site
+// against a future re-add once/if such a symbol returns, and against any other `.EffectiveVersion`
+// assignment creeping into the orchestration.)
+func TestResolveBuildEngine_DoesNotPopulateEffectiveVersion(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "resolve.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse resolve.go: %v", err)
+	}
+	var fn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		if fd, ok := decl.(*ast.FuncDecl); ok && fd.Name.Name == "resolveBuildEngine" {
+			fn = fd
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatal("resolveBuildEngine not found in resolve.go — this test would be vacuous")
+	}
+
+	var problems []string
+	ast.Inspect(fn, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.CallExpr:
+			switch fun := x.Fun.(type) {
+			case *ast.SelectorExpr:
+				if fun.Sel.Name == "ComputeEffectiveVersions" {
+					problems = append(problems, fmt.Sprintf("call to ComputeEffectiveVersions at %s", fset.Position(x.Pos())))
+				}
+			case *ast.Ident:
+				if fun.Name == "ComputeEffectiveVersions" {
+					problems = append(problems, fmt.Sprintf("call to ComputeEffectiveVersions at %s", fset.Position(x.Pos())))
+				}
+			}
+		case *ast.AssignStmt:
+			for _, lhs := range x.Lhs {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "EffectiveVersion" {
+					problems = append(problems, fmt.Sprintf("assignment to .EffectiveVersion at %s", fset.Position(x.Pos())))
+				}
+			}
+		}
+		return true
+	})
+	if len(problems) > 0 {
+		t.Fatalf("resolveBuildEngine must not populate EffectiveVersion (its sole writer, deploykit.ComputeEffectiveVersions, was deleted by the schema-versioning removal); found:\n- %s", strings.Join(problems, "\n- "))
+	}
+}
+
+// TestResolvePipeline_LeavesEffectiveVersionUnset is the runtime half of the coverage: it drives the
+// resolve chain `resolveBuildEngine` still calls after the removal
+// (`buildkit.ResolveAllBox` → `deploykit.ComputeIntermediates` → `deploykit.GlobalCandyOrder`) over a
+// fixture box and asserts `spec.ResolvedBox.EffectiveVersion` stays empty, so a future sdk-side
+// population of the field on this chain is caught. It deliberately does NOT use
+// `fullResolvedBoxFixture` / the byte-stable golden: those hardcode `EffectiveVersion` for the
+// wire-projection completeness assertion and so say nothing about the resolve path.
 func TestResolvePipeline_LeavesEffectiveVersionUnset(t *testing.T) {
 	// A minimal, candy-free box so the resolve chain runs standalone: ComputeIntermediates /
 	// GlobalCandyOrder need a layer for every referenced candy, and this test is about the
