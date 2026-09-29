@@ -29,9 +29,8 @@ import (
 // M-mechanism per the boundary law); runValidateEngine gets that from the host's small
 // "validate-word-sets" leg and folds it onto the envelope this Op returns.
 
-// diagSeverityError mirrors charly's former diagSeverityError (validate_project_host.go) — the
-// spec.Diagnostic severity for a hard tolerant-load failure.
-const diagSeverityError = "error"
+// The tolerant-load failure severity is spec's closed-vocabulary SeverityError (spec#186) — the
+// former local diagSeverityError raw "error" literal is gone with the one-domain cutover.
 
 // resolveProjectEnvelopeTolerant is the TOLERANT project resolve: a LoadUnified or candy-scan
 // failure is appended to diags and the resolve continues best-effort (empty envelope / empty
@@ -42,7 +41,7 @@ const diagSeverityError = "error"
 func resolveProjectEnvelopeTolerant(ctx context.Context, ex *sdk.Executor, req spec.ValidateProjectRequest) (spec.ResolvedProject, spec.Diagnostics) {
 	var diags spec.Diagnostics
 	addDiag := func(err error) {
-		diags.Items = append(diags.Items, spec.Diagnostic{Severity: diagSeverityError, Message: err.Error()})
+		diags.Items = append(diags.Items, spec.Diagnostic{Severity: spec.SeverityError, Message: err.Error()})
 	}
 
 	dir := req.Dir

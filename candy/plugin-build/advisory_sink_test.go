@@ -10,22 +10,31 @@ import (
 	"github.com/opencharly/spec/spec"
 )
 
-// diagWarnSink is what makes scan advisories COUNTABLE. Before it they were stderr writes in
+// diagWarnSink is what makes scan diagnostics COUNTABLE. Before it they were stderr writes in
 // sdk/loaderkit, so `charly box validate` could not report how many warnings a run produced —
-// an early draft of its summary printed "0 warnings" on a run that had just emitted two.
+// an early draft of its summary printed "0 warnings" on a run that had just emitted two. The
+// seam's LEVEL travels through: a WARNING is warning-tier, an INFO observation is not.
 func TestDiagWarnSinkCollectsAdvisoriesAsWarnings(t *testing.T) {
 	var diags spec.Diagnostics
-	warn := diagWarnSink(&diags)
+	diag := diagWarnSink(&diags)
 
-	warn("candy %s resolved to multiple versions; using newest %s", "acme/thing", "2026.242.1655")
-	warn("local candy %q shadows remote candy %q", "punktfunk", "github.com/o/punktfunk")
+	diag(spec.DiagWarning, "candy %s resolved to multiple versions; using newest %s", "acme/thing", "2026.242.1655")
+	diag(spec.DiagWarning, "local candy %q shadows remote candy %q", "punktfunk", "github.com/o/punktfunk")
+	diag(spec.DiagInfo, "candy %s resolved to multiple git tags with differing content within one scope", "acme/thing")
 
-	if len(diags.Items) != 2 {
-		t.Fatalf("expected 2 diagnostics, got %d", len(diags.Items))
+	if len(diags.Items) != 3 {
+		t.Fatalf("expected 3 diagnostics, got %d", len(diags.Items))
 	}
 	for i, it := range diags.Items {
-		if it.Severity != "warning" {
-			t.Errorf("item %d severity = %q, want \"warning\" — an advisory must never be an error", i, it.Severity)
+		want := spec.SeverityWarning
+		if i == 2 {
+			want = spec.SeverityInfo
+		}
+		if it.Severity != want {
+			t.Errorf("item %d severity = %q, want %q", i, it.Severity, want)
+		}
+		if it.IsError() {
+			t.Errorf("item %d (%q) must never be error-tier — a scan advisory is not a gate failure", i, it.Severity)
 		}
 	}
 	if !strings.Contains(diags.Items[0].Message, "acme/thing") ||
@@ -37,8 +46,8 @@ func TestDiagWarnSinkCollectsAdvisoriesAsWarnings(t *testing.T) {
 // The sink must APPEND, not replace: a run emits several advisories and the count has to be
 // the total, not the last one.
 func TestDiagWarnSinkAppendsToExistingDiagnostics(t *testing.T) {
-	diags := spec.Diagnostics{Items: []spec.Diagnostic{{Severity: "error", Message: "pre-existing"}}}
-	diagWarnSink(&diags)("an advisory")
+	diags := spec.Diagnostics{Items: []spec.Diagnostic{{Severity: spec.SeverityError, Message: "pre-existing"}}}
+	diagWarnSink(&diags)(spec.DiagWarning, "an advisory")
 	if len(diags.Items) != 2 {
 		t.Fatalf("expected the sink to append, got %d items", len(diags.Items))
 	}
@@ -48,8 +57,8 @@ func TestDiagWarnSinkAppendsToExistingDiagnostics(t *testing.T) {
 }
 
 // The BUILD paths keep printing, because they have no diagnostics envelope to collect into.
-// This pins that stderrWarn really writes to stderr and formats its arguments, so the two
-// sinks cannot silently converge on the same behaviour.
+// This pins that stderrWarn really writes to stderr, formats its arguments, and prefixes by the
+// seam's LEVEL, so the two sinks cannot silently converge on the same behaviour.
 func TestStderrWarnWritesToStderr(t *testing.T) {
 	orig := os.Stderr
 	r, w, err := os.Pipe()
@@ -57,7 +66,7 @@ func TestStderrWarnWritesToStderr(t *testing.T) {
 		t.Fatalf("pipe: %v", err)
 	}
 	os.Stderr = w
-	stderrWarn("candy %s resolved to multiple versions", "acme/thing")
+	stderrWarn(spec.DiagWarning, "candy %s resolved to multiple versions", "acme/thing")
 	_ = w.Close()
 	os.Stderr = orig
 
@@ -66,7 +75,7 @@ func TestStderrWarnWritesToStderr(t *testing.T) {
 		t.Fatalf("read: %v", cerr)
 	}
 	got := strings.TrimSpace(buf.String())
-	if got != "candy acme/thing resolved to multiple versions" {
+	if got != "Warning: candy acme/thing resolved to multiple versions" {
 		t.Errorf("stderrWarn output = %q", got)
 	}
 }

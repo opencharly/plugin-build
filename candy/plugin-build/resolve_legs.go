@@ -144,29 +144,48 @@ func scanLocalLeg(ctx context.Context, ex *sdk.Executor, uf *spec.UnifiedFile, d
 //     through it was an identity). `buildengine-scan-remote` died with it.
 //
 // So NONE of the three ScanSeams legs is a host round-trip any more.
-// diagWarnSink collects scan advisories into a Diagnostics envelope as warning-severity
-// items, which is what makes them COUNTABLE — `charly box validate` reports the number, and
-// before this they were stderr writes it could never see.
-//
-// Severity is "warning" deliberately: these are advisories, not failures, and emitVerdict
-// filters them out of the error verdict while the summary counts them.
-func diagWarnSink(diags *spec.Diagnostics) func(string, ...any) {
-	return func(format string, args ...any) {
+// diagSeverity maps a scan-seam spec.DiagLevel onto the spec.Diagnostic severity vocabulary. The
+// seam's two levels ARE the two non-error severities (spec#186 keeps ONE string domain: DiagInfo
+// carries exactly SeverityInfo, DiagWarning exactly SeverityWarning), so an INFO observation is
+// never counted as a gate-failing warning while a genuinely unresolvable WARNING stays countable.
+// Only DiagWarning is warning-tier; every other level is a non-gating observation (spec's
+// IsError fails closed, so an unknown tier never silently passes a gate).
+func diagSeverity(level spec.DiagLevel) string {
+	if level == spec.DiagWarning {
+		return spec.SeverityWarning
+	}
+	return spec.SeverityInfo
+}
+
+// diagWarnSink collects scan diagnostics into a Diagnostics envelope, which is what makes them
+// COUNTABLE — `charly box validate` reports the number, and before this they were stderr writes
+// it could never see. The seam's LEVEL travels through: an INFO observation is recorded at
+// SeverityInfo (and, via Diagnostic.IsError, never fails a gate), a WARNING at SeverityWarning.
+// These are advisories, not failures, so emitVerdict filters the non-error tiers out of the error
+// verdict while the summary counts them.
+func diagWarnSink(diags *spec.Diagnostics) func(spec.DiagLevel, string, ...any) {
+	return func(level spec.DiagLevel, format string, args ...any) {
 		diags.Items = append(diags.Items, spec.Diagnostic{
-			Severity: "warning",
+			Severity: diagSeverity(level),
 			Message:  fmt.Sprintf(format, args...),
 		})
 	}
 }
 
-// stderrWarn is the advisory sink for the BUILD paths, which have no diagnostics envelope to
-// collect into. Named and passed explicitly rather than defaulted from a nil: every caller
-// states where its advisories go, so there is no implicit behaviour to discover later.
-func stderrWarn(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
+// stderrWarn is the diagnostic sink for the BUILD paths, which have no diagnostics envelope to
+// collect into. Named and passed explicitly rather than defaulted from a nil: every caller states
+// where its diagnostics go, so there is no implicit behaviour to discover later. The level picks
+// the prefix — "Warning:" for a gate-failing warning, "Notice:" for a non-gating info — mirroring
+// the seam's own nil-sink fallback (loaderkit emitDiag), since the sink owns its formatting now.
+func stderrWarn(level spec.DiagLevel, format string, args ...any) {
+	prefix := "Notice:"
+	if level == spec.DiagWarning {
+		prefix = "Warning:"
+	}
+	fmt.Fprintf(os.Stderr, prefix+" "+format+"\n", args...)
 }
 
-func scanSeamsLeg(ctx context.Context, ex *sdk.Executor, rr spec.ResolvedProjectRequest, cfg *spec.Config, distroCfg *spec.DistroConfig, warn func(string, ...any)) loaderkit.ScanSeams {
+func scanSeamsLeg(ctx context.Context, ex *sdk.Executor, rr spec.ResolvedProjectRequest, cfg *spec.Config, distroCfg *spec.DistroConfig, diag func(spec.DiagLevel, string, ...any)) loaderkit.ScanSeams {
 	return loaderkit.ScanSeams{
 		CollectRemoteRefs: func(localScanned map[string]spec.ScannedCandy) ([]loaderkit.RemoteDownload, error) {
 			opts := spec.BoxResolveOpts(rr.RequestedBoxes, rr.IncludeDisabled)
@@ -180,11 +199,12 @@ func scanSeamsLeg(ctx context.Context, ex *sdk.Executor, rr spec.ResolvedProject
 		},
 		EnsureRepo: ensureRepoLeg(ctx, ex),
 		ScanRemote: scanRemoteLeg(parseCandyManifestLeg(ctx, ex, distroCfg)),
-		// Scan advisories (candy-version skew, local-shadow notes) arrive as DATA here rather
+		// Scan diagnostics (candy-version skew, local-shadow notes) arrive as DATA here rather
 		// than going straight to stderr, so a caller can count and report them. The tolerant
 		// resolver passes diagWarnSink to collect them as diagnostics; the build paths pass
-		// stderrWarn, which prints as before.
-		Warn: warn,
+		// stderrWarn, which prints as before. The LEVEL is the seam's first argument (INFO vs
+		// WARNING), so a resolvable skew is never counted as a gate-failing warning.
+		Diag: diag,
 	}
 }
 
@@ -240,18 +260,19 @@ func scanRemoteLeg(parseDoc func(string) (*spec.Candy, error)) func(cacheDir, re
 // set verbatim (the reachability walk runs ONCE per namespace in fillNamespacedBoxes, over the
 // namespace's own cfg); EnsureRepo/ScanRemote reuse the cfg-agnostic shared legs for the transitive
 // fetch. Nothing here crosses to the host.
-func namespaceScanSeams(ctx context.Context, ex *sdk.Executor, downloads []spec.RemoteDownload, distroCfg *spec.DistroConfig, warn func(string, ...any)) loaderkit.ScanSeams {
+func namespaceScanSeams(ctx context.Context, ex *sdk.Executor, downloads []spec.RemoteDownload, distroCfg *spec.DistroConfig, diag func(spec.DiagLevel, string, ...any)) loaderkit.ScanSeams {
 	return loaderkit.ScanSeams{
 		CollectRemoteRefs: func(_ map[string]spec.ScannedCandy) ([]loaderkit.RemoteDownload, error) {
 			return downloads, nil
 		},
 		EnsureRepo: ensureRepoLeg(ctx, ex),
 		ScanRemote: scanRemoteLeg(parseCandyManifestLeg(ctx, ex, distroCfg)),
-		// Scan advisories (candy-version skew, local-shadow notes) arrive as DATA here rather
+		// Scan diagnostics (candy-version skew, local-shadow notes) arrive as DATA here rather
 		// than going straight to stderr, so a caller can count and report them. The tolerant
 		// resolver passes diagWarnSink to collect them as diagnostics; the build paths pass
-		// stderrWarn, which prints as before.
-		Warn: warn,
+		// stderrWarn, which prints as before. The LEVEL is the seam's first argument (INFO vs
+		// WARNING), so a resolvable skew is never counted as a gate-failing warning.
+		Diag: diag,
 	}
 }
 
@@ -282,7 +303,7 @@ func validateProjectLeg(ctx context.Context, ex *sdk.Executor, rr spec.ResolvedP
 	}
 	var msgs []string
 	for _, it := range diags.Items {
-		if it.Severity == "warning" {
+		if !it.IsError() {
 			continue
 		}
 		msgs = append(msgs, it.Message)
