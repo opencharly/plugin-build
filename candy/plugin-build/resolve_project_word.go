@@ -171,7 +171,12 @@ func projectCacheKey(dir string, req spec.ResolvedProjectRequest) (*cache.Layout
 
 	// Sorted before joining: the same scope requested in a different ORDER is the same scan, and
 	// must hit the same entry rather than resolving the whole project a second time.
-	extra := append([]string(nil), req.ExtraCandyRefs...)
+	// A ref's SCOPE is part of its identity (ExtraCandyRef carries it), so it is part of the key:
+	// the same candy ref requested from two different scopes is two different scans.
+	extra := make([]string, 0, len(req.ExtraCandyRefs))
+	for _, ec := range req.ExtraCandyRefs {
+		extra = append(extra, ec.Ref+"\x00"+ec.Scope)
+	}
 	sort.Strings(extra)
 	boxes := append([]string(nil), req.RequestedBoxes...)
 	sort.Strings(boxes)

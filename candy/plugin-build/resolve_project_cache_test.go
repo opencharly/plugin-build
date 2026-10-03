@@ -179,8 +179,8 @@ func TestProjectCacheKeySeparatesScanScope(t *testing.T) {
 		name string
 		req  spec.ResolvedProjectRequest
 	}{
-		{"one add_candy ref", spec.ResolvedProjectRequest{Dir: dir, ExtraCandyRefs: []string{qs}}},
-		{"a different add_candy ref", spec.ResolvedProjectRequest{Dir: dir, ExtraCandyRefs: []string{wl}}},
+		{"one add_candy ref", spec.ResolvedProjectRequest{Dir: dir, ExtraCandyRefs: []spec.ExtraCandyRef{{Ref: qs}}}},
+		{"a different add_candy ref", spec.ResolvedProjectRequest{Dir: dir, ExtraCandyRefs: []spec.ExtraCandyRef{{Ref: wl}}}},
 		{"include disabled", spec.ResolvedProjectRequest{Dir: dir, IncludeDisabled: true}},
 		{"requested boxes", spec.ResolvedProjectRequest{Dir: dir, RequestedBoxes: []string{"some-box"}}},
 		{"local superproject", spec.ResolvedProjectRequest{Dir: dir, LocalSuperproject: true}},
@@ -191,8 +191,8 @@ func TestProjectCacheKeySeparatesScanScope(t *testing.T) {
 	}
 
 	// Two DIFFERENT widenings must not collide with each other either.
-	_, kq := projectCacheKey(dir, spec.ResolvedProjectRequest{Dir: dir, ExtraCandyRefs: []string{qs}})
-	_, kw := projectCacheKey(dir, spec.ResolvedProjectRequest{Dir: dir, ExtraCandyRefs: []string{wl}})
+	_, kq := projectCacheKey(dir, spec.ResolvedProjectRequest{Dir: dir, ExtraCandyRefs: []spec.ExtraCandyRef{{Ref: qs}}})
+	_, kw := projectCacheKey(dir, spec.ResolvedProjectRequest{Dir: dir, ExtraCandyRefs: []spec.ExtraCandyRef{{Ref: wl}}})
 	if kq == kw {
 		t.Error("two different add_candy refs share a cache key")
 	}
@@ -202,12 +202,21 @@ func TestProjectCacheKeySeparatesScanScope(t *testing.T) {
 // scan, and must reuse the entry instead of re-resolving the whole project.
 func TestProjectCacheKeyOrderIndependent(t *testing.T) {
 	dir := writeProbeProject(t)
-	a := spec.ResolvedProjectRequest{Dir: dir, ExtraCandyRefs: []string{"@a/candy/a:v1", "@b/candy/b:v2"}, RequestedBoxes: []string{"x", "y"}}
-	b := spec.ResolvedProjectRequest{Dir: dir, ExtraCandyRefs: []string{"@b/candy/b:v2", "@a/candy/a:v1"}, RequestedBoxes: []string{"y", "x"}}
+	a := spec.ResolvedProjectRequest{Dir: dir, ExtraCandyRefs: []spec.ExtraCandyRef{{Ref: "@a/candy/a:v1"}, {Ref: "@b/candy/b:v2"}}, RequestedBoxes: []string{"x", "y"}}
+	b := spec.ResolvedProjectRequest{Dir: dir, ExtraCandyRefs: []spec.ExtraCandyRef{{Ref: "@b/candy/b:v2"}, {Ref: "@a/candy/a:v1"}}, RequestedBoxes: []string{"y", "x"}}
 	_, ka := projectCacheKey(dir, a)
 	_, kb := projectCacheKey(dir, b)
 	if ka != kb {
 		t.Errorf("reordering the same scope changed the key:\n  %q\n  %q", ka, kb)
+	}
+
+	// A ref's SCOPE is part of its identity (spec.ExtraCandyRef carries it), so the SAME candy ref
+	// requested from two different boxes is two different scans and must not share an entry — the
+	// #739 constant-scope collision.
+	_, kboxA := projectCacheKey(dir, spec.ResolvedProjectRequest{Dir: dir, ExtraCandyRefs: []spec.ExtraCandyRef{{Ref: "@a/candy/a:v1", Scope: spec.BoxScope("box-a")}}})
+	_, kboxB := projectCacheKey(dir, spec.ResolvedProjectRequest{Dir: dir, ExtraCandyRefs: []spec.ExtraCandyRef{{Ref: "@a/candy/a:v1", Scope: spec.BoxScope("box-b")}}})
+	if kboxA == kboxB {
+		t.Error("the same candy ref from two different box scopes shares a cache key")
 	}
 }
 
