@@ -135,9 +135,15 @@ func (c driveConfig) buildPodmanPushArgs(tags []string, platforms []string, name
 // Default: "image" (read-only from registry) for local builds, "registry" (read+write) for push
 // builds. Podman uses plain image refs for --cache-from/--cache-to (no tags allowed for
 // --cache-to). Docker buildx uses type=registry,ref=... syntax with a separate cache repo.
+//
+// A no-cache build (`--no-cache`, or `--cache none`) returns the ENGINE's own `--no-cache`, so the
+// LOCAL layer cache is bypassed too — not merely the --cache-from export (opencharly/charly#483:
+// the flag was read, but a build asked not to use the cache still served 126/136 layers from it).
+// It still does NOT defeat a `--mount=type=cache` package mount (a pacman/dnf cache survives
+// --no-cache by design); the flag means "cold LAYER cache", which is what its help says.
 func (c driveConfig) cacheArgs(name, registry, engine string) []string {
 	if c.NoCache || c.Cache == "none" {
-		return nil
+		return []string{"--no-cache"}
 	}
 
 	cacheType := c.Cache

@@ -279,6 +279,9 @@ func TestBuildNoCache(t *testing.T) {
 		"docker", "build", "--layers=true", "-f", "-",
 		"-t", "ghcr.io/opencharly/fedora:latest",
 		"--platform", "linux/amd64",
+		// --no-cache reaches the ENGINE (opencharly/charly#483): a build asked not to use the
+		// cache must bypass the LOCAL layer cache, not merely skip --cache-from.
+		"--no-cache",
 		".",
 	}
 	if !reflect.DeepEqual(args, want) {
@@ -295,6 +298,8 @@ func TestBuildCacheNone(t *testing.T) {
 		"docker", "build", "--layers=true", "-f", "-",
 		"-t", "ghcr.io/opencharly/fedora:latest",
 		"--platform", "linux/amd64",
+		// --cache none is the same "do not use the cache" as --no-cache.
+		"--no-cache",
 		".",
 	}
 	if !reflect.DeepEqual(args, want) {
