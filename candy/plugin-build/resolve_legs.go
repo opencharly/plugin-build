@@ -371,8 +371,8 @@ func projectResolvedProjectLeg(ctx context.Context, ex *sdk.Executor, cfg *spec.
 		ResolveBox: func(c *spec.Config, name, cv, d string) (*buildkit.ResolvedBox, error) {
 			return buildkit.ResolveBox(c, name, cv, d, buildkit.ResolveOpts{IncludeDisabled: includeDisabled, DistroCfg: distroCfg, BuilderCfg: builderCfg})
 		},
-		FillNamespacedBoxes: func(rootUF *spec.UnifiedFile, ic *buildkit.InitConfig, prefix, cv, d string, rp *spec.ResolvedProject, visited map[*spec.UnifiedFile]bool) {
-			fillNamespacedBoxes(ctx, ex, rootUF, ic, prefix, cv, d, includeDisabled, distroCfg, builderCfg, rp, visited)
+		FillNamespacedBoxes: func(rootUF *spec.UnifiedFile, ic *buildkit.InitConfig, prefix, cv, d string, rp *spec.ResolvedProject, ancestors loaderkit.NamespaceAncestors) {
+			fillNamespacedBoxes(ctx, ex, rootUF, ic, prefix, cv, d, includeDisabled, distroCfg, builderCfg, rp, ancestors)
 		},
 		ResolveResources: func(u *spec.UnifiedFile) map[string]*spec.ResolvedResource {
 			return spec.ResolvePluginKindViaPlugin(u, "resource", resolveResourceLeg(ctx, ex))
@@ -409,8 +409,11 @@ func projectResolvedProjectLeg(ctx context.Context, ex *sdk.Executor, cfg *spec.
 // Behaviour is preserved verbatim from the deleted pair:
 //   - the nsDir FALLBACK — a namespace's candy `from:` paths are relative to the NAMESPACE's own
 //     root (subUF.RootDir), falling back to the OUTER project dir when a namespace carries none;
-//   - the VISITED cycle-guard, keyed on the *spec.UnifiedFile pointer (the loader mounts a
-//     back-imported ancestor as the SAME in-progress node, so a mutual import terminates here);
+//   - the cycle-guard is the SHARED path-scoped ancestor stack the seam already carries
+//     (loaderkit.NamespaceAncestors), entered on the way in and left on the way out: the loader
+//     mounts a back-imported ancestor as the SAME in-progress node, so a mutual import terminates
+//     here — while the SAME node reached by a SECOND path (a diamond import, a multi-alias mount)
+//     still walks. A global visited set silently drops those later paths;
 //   - DFS PRE-ORDER (fold a namespace, then descend into it), matching the flat reply's append order;
 //   - the reachability walk runs UNCONDITIONALLY, never `if len(scanned) > 0`: CollectRemoteRefsOpts
 //     walks sub.Box to collect the BOXES' candy @-refs, so a namespace that vendors no candies of its
@@ -422,17 +425,24 @@ func projectResolvedProjectLeg(ctx context.Context, ex *sdk.Executor, cfg *spec.
 //     own distroCfg/builderCfg/ic;
 //   - every step is best-effort/additive: a namespace whose scan, walk, or fix-point fails
 //     contributes nothing and never aborts the resolve, and recursion into its children continues.
-func fillNamespacedBoxes(ctx context.Context, ex *sdk.Executor, uf *spec.UnifiedFile, ic *buildkit.InitConfig, prefix, cv, d string, includeDisabled bool, distroCfg *buildkit.DistroConfig, builderCfg *buildkit.BuilderConfig, rp *spec.ResolvedProject, visited map[*spec.UnifiedFile]bool) {
+func fillNamespacedBoxes(ctx context.Context, ex *sdk.Executor, uf *spec.UnifiedFile, ic *buildkit.InitConfig, prefix, cv, d string, includeDisabled bool, distroCfg *buildkit.DistroConfig, builderCfg *buildkit.BuilderConfig, rp *spec.ResolvedProject, ancestors loaderkit.NamespaceAncestors) {
 	if uf == nil {
 		return
 	}
-	if visited == nil {
-		visited = map[*spec.UnifiedFile]bool{}
+	// ancestors is the seam's SHARED, PATH-SCOPED guard: Enter records uf on the current descent
+	// path and returns the leave that pops it again, so a cycle terminates while the same node
+	// reached by a second path still walks. A bare `visited[uf] = true` (this function's former
+	// shape) is a GLOBAL set and silently drops the second path. A nil map would panic on Enter, so
+	// a caller that did not come through the seam still gets the old no-guard-of-its-own behaviour
+	// rather than a crash.
+	if ancestors == nil {
+		ancestors = loaderkit.NamespaceAncestors{}
 	}
-	if visited[uf] {
+	leave, ok := ancestors.Enter(uf)
+	if !ok {
 		return
 	}
-	visited[uf] = true
+	defer leave()
 	opts := spec.BoxResolveOpts(nil, includeDisabled)
 	vopts := spec.ResolveOpts{IncludeDisabled: includeDisabled, DistroCfg: distroCfg, BuilderCfg: builderCfg, InitCfg: ic}
 	for ns, subUF := range uf.Namespaces {
@@ -482,6 +492,6 @@ func fillNamespacedBoxes(ctx context.Context, ex *sdk.Executor, uf *spec.Unified
 			}
 			deploykit.FillNamespaceBoxViews(sub, nsLayers, ic, child, cv, d, vopts, rp)
 		}
-		fillNamespacedBoxes(ctx, ex, subUF, ic, child, cv, d, includeDisabled, distroCfg, builderCfg, rp, visited)
+		fillNamespacedBoxes(ctx, ex, subUF, ic, child, cv, d, includeDisabled, distroCfg, builderCfg, rp, ancestors)
 	}
 }

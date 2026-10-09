@@ -152,3 +152,46 @@ func TestFillNamespacedBoxes_QualifiedView(t *testing.T) {
 		t.Error("jupyter should NOT be visible at root scope (it's namespaced under 'fedora')")
 	}
 }
+
+// TestFillNamespacedBoxes_DiamondImportWalksBothPaths guards the cycle-guard's SCOPE, which is the
+// half a cycle test cannot see. The loader deliberately mounts the SAME *spec.UnifiedFile at more
+// than one namespace path — a diamond import, a multi-alias mount. A GLOBAL visited set records
+// that pointer on the first descent and silently drops every later alias, so `b.c`'s boxes never
+// reach the envelope and the resolve quietly resolves FEWER boxes than the project declares; the
+// cycle it was built to stop still terminates either way, which is why the global shape looks
+// correct in every test that only exercises a cycle.
+//
+// The shared PathAncestor stack (loaderkit.NamespaceAncestors) is entered and LEFT per descent
+// path, so both paths walk. `a.c` and `b.c` are the same pointer on purpose.
+func TestFillNamespacedBoxes_DiamondImportWalksBothPaths(t *testing.T) {
+	// The guard sits on the RECURSION, not on the fold: a node's own boxes are folded by its
+	// PARENT's loop iteration. So a leaf shared node shows nothing — the diamond only becomes
+	// observable when the shared node has a namespace of its OWN, i.e. when the second path has
+	// grandchildren to lose. `d` is that grandchild.
+	deep := &spec.UnifiedFile{
+		Box: boxMapOfFixture(map[string]spec.BoxConfig{
+			"jupyter": {Base: "quay.io/fedora/fedora:43", Build: []string{"rpm"}, Distro: []string{"fedora"}, Candy: []string{}},
+		}),
+	}
+	shared := &spec.UnifiedFile{Namespaces: map[string]*spec.UnifiedFile{"d": deep}}
+	a := &spec.UnifiedFile{Namespaces: map[string]*spec.UnifiedFile{"c": shared}}
+	b := &spec.UnifiedFile{Namespaces: map[string]*spec.UnifiedFile{"c": shared}}
+	rootUF := &spec.UnifiedFile{Namespaces: map[string]*spec.UnifiedFile{"a": a, "b": b}}
+	ex := sdk.NewInProcExecutor(&fakeNamespaceExecutorServiceClient{})
+
+	rp, err := projectResolvedProjectLeg(context.Background(), ex, &spec.Config{}, nil, rootUF,
+		&spec.DistroConfig{}, &spec.BuilderConfig{}, &buildkit.InitConfig{}, t.TempDir(), "2026.100.0000", "2026.100.0000",
+		false, nil, nil)
+	if err != nil {
+		t.Fatalf("projectResolvedProjectLeg: %v", err)
+	}
+	keys := make([]string, 0, len(rp.Boxes))
+	for k := range rp.Boxes {
+		keys = append(keys, k)
+	}
+	for _, want := range []string{"a.c.d.jupyter", "b.c.d.jupyter"} {
+		if _, ok := rp.Boxes[want]; !ok {
+			t.Fatalf("%s missing from rp.Boxes — a GLOBAL cycle guard dropped the second path to a shared namespace node; keys=%v", want, keys)
+		}
+	}
+}
