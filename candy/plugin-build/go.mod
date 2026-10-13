@@ -3,7 +3,7 @@ module github.com/opencharly/plugin-build/candy/plugin-build
 go 1.26.4
 
 require (
-	github.com/opencharly/sdk v0.2026282.1759
+	github.com/opencharly/sdk v0.2026286.849
 	golang.org/x/sync v0.22.0
 )
 
