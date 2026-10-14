@@ -24,8 +24,8 @@ import (
 
 func TestMain(m *testing.M) {
 	tmp := os.TempDir()
-	os.Setenv(loaderkit.SystemConfigEnv, filepath.Join(tmp, "charly-test-absent-system.yml"))
-	os.Setenv(spec.DeployConfigEnv, filepath.Join(tmp, "charly-test-absent-user.yml"))
+	_ = os.Setenv(loaderkit.SystemConfigEnv, filepath.Join(tmp, "charly-test-absent-system.yml"))
+	_ = os.Setenv(spec.DeployConfigEnv, filepath.Join(tmp, "charly-test-absent-user.yml"))
 	code := m.Run()
 	os.Exit(code)
 }

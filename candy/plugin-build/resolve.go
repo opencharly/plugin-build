@@ -220,7 +220,10 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 	if err != nil {
 		return spec.BuildResolveReply{Error: errString(err)}, nil
 	}
-	engine := kit.EngineBinary(rt.BuildEngine)
+	// The engine the drive resolves is the RUN engine: the builder is BuildKit (not an engine),
+	// and every surviving consumer of this value — the privileged builder bootstrap, the inline
+	// merge, and the kit's store bridge — acts on the RUN engine's store.
+	engine := kit.EngineBinary(rt.RunEngine)
 	platform := req.Platform
 	if platform == "" && !req.Push {
 		platform = buildkit.HostPlatform()
@@ -242,17 +245,17 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 
 	def := cfg.Defaults
 	return spec.BuildResolveReply{
-		Engine:          engine,
-		EngineName:      rt.BuildEngine,
-		Platform:        platform,
-		Order:           order,
-		Levels:          levels,
-		Boxes:           descriptors,
-		Jobs:            int64(resolveDriveJobs(int(req.Jobs), def)),
-		PodmanJobs:      int64(buildkit.ResolvePodmanJobs(resolveDrivePodmanJobs(int(req.PodmanJobs), def), resolveIntPtrDrive(def.PodmanJobsCap))),
-		Cache:           resolveDriveCache(req.Cache, def),
-		KeepImages:      int64(resolveIntPtrDrive(def.KeepImages)),
-		ResolvedProject: rp,
+		Engine:           engine,
+		EngineName:       rt.RunEngine,
+		Platform:         platform,
+		Order:            order,
+		Levels:           levels,
+		Boxes:            descriptors,
+		Jobs:             int64(resolveDriveJobs(int(req.Jobs), def)),
+		StageParallelism: int64(buildkit.ResolveStageParallelism(resolveDriveStageParallelism(int(req.StageParallelism), def), resolveIntPtrDrive(def.StageParallelismCap))),
+		Cache:            resolveDriveCache(req.Cache, def),
+		KeepImages:       int64(resolveIntPtrDrive(def.KeepImages)),
+		ResolvedProject:  rp,
 	}, nil
 }
 
@@ -319,11 +322,14 @@ func resolveDriveJobs(jobs int, def spec.BoxConfig) int {
 	return jobs
 }
 
-func resolveDrivePodmanJobs(pj int, def spec.BoxConfig) int {
-	if pj == 0 {
-		return resolveIntPtrDrive(def.PodmanJobs)
+// resolveDriveStageParallelism resolves the INNER concurrency — the stages of one build, the
+// knob the contract renamed from `podman_jobs` to `stage_parallelism`. Its schema-side half and
+// its migration entry are already landed; this is the drive's read of it.
+func resolveDriveStageParallelism(sp int, def spec.BoxConfig) int {
+	if sp == 0 {
+		return resolveIntPtrDrive(def.StageParallelism)
 	}
-	return pj
+	return sp
 }
 
 func resolveDriveCache(cache string, def spec.BoxConfig) string {

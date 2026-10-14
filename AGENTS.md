@@ -11,7 +11,7 @@ Canonical files:
 - `candy/plugin-build/charly.yml` — the `plugin-build:` candy entity (`plugin:`
   block, `plan:` check).
 - `candy/plugin-build/` — the Go source: `plugin.go`, `drive.go`, `resolve*.go`,
-  `render.go`, `podman.go`, `ensure.go`, `host_prep.go`, `bootstrap.go`,
+  `render.go`, `buildkit.go`, `ensure.go`, `host_prep.go`, `bootstrap.go`,
   `schema/build.cue`, `cmd/serve/main.go`.
 - `.github/workflows/tag-on-merge.yml` — CalVer tag + `CHANGELOG/` on merge.
 - `README.md` — user overview only; never agent guidance.

@@ -19,21 +19,26 @@ import (
 // host-resolved reply.Jobs is unset (< 1). Mirrors the former host-side buildImages fallback.
 const jobsFallback = 4
 
-// driveConfig is the candy-side drive model — the small set of resolved knobs the podman drive
-// reads. Engine/EngineName/Platform/Cache/Jobs/PodmanJobs come from the host build-resolve reply
-// (Platform + PodmanJobs already resolved host-side; Jobs/Cache are the config-resolved tunables);
-// Push/NoCache are raw CLI flags the candy reads directly from the BuildRequest (the reply does
-// NOT carry NoCache). Dir is the project/build-context dir the podman build runs in.
+// driveConfig is the candy-side drive model — the small set of resolved knobs the drive reads.
+// Platform/StageParallelism come from the host build-resolve reply (already resolved host-side);
+// Jobs/Cache are the config-resolved tunables; Push/NoCache are raw CLI flags the candy reads
+// directly from the BuildRequest (the reply does NOT carry NoCache). Dir is the project dir the
+// build runs in; BuildDir is its generated `.build/` tree.
+//
+// ⚑ RunEngine, not a build engine. The builder is BuildKit — not an engine and never a member of
+// the closed engine vocabulary — so the engine this drive resolves is the RUN engine, which is
+// what the survivors all want: the privileged builder bootstrap, the inline merge, and the store
+// bridge (option (A)) that hands the built image to that engine's store for every later read.
 type driveConfig struct {
-	Engine     string // build engine binary (e.g. "podman")
-	EngineName string // runtime build-engine name ("podman"/"docker")
-	Platform   string // target platform (host-resolved; empty on a push build)
-	Cache      string // resolved --cache mode
-	Push       bool   // --push
-	NoCache    bool   // --no-cache
-	Jobs       int    // outer concurrency (images per DAG level)
-	PodmanJobs int    // inner concurrency (podman build --jobs; already resolved host-side)
-	Dir        string // project dir the podman build runs in
+	RunEngine        string // runtime RUN-engine name ("podman"/"docker"/"nerdctl")
+	Platform         string // target platform (host-resolved; empty on a push build)
+	Cache            string // resolved --cache mode
+	Push             bool   // --push
+	NoCache          bool   // --no-cache
+	Jobs             int    // outer concurrency (images per DAG level)
+	StageParallelism int    // inner concurrency: the stages of ONE build, resolved host-side
+	Dir              string // project dir the build runs in
+	BuildDir         string // the generated `.build/` tree inside Dir
 }
 
 // resolveBuild runs the build-engine RESOLVE PLUGIN-SIDE (K3 U6 inversion): resolveBuildEngine loads
@@ -65,15 +70,15 @@ func runBoxBuild(ctx context.Context, ex *sdk.Executor, req spec.BuildRequest) (
 		return nil, err
 	}
 	cfg := driveConfig{
-		Engine:     reply.Engine,
-		EngineName: reply.EngineName,
-		Platform:   reply.Platform,
-		Cache:      reply.Cache,
-		Push:       req.Push,
-		NoCache:    req.NoCache,
-		Jobs:       int(reply.Jobs),
-		PodmanJobs: int(reply.PodmanJobs),
-		Dir:        req.Dir,
+		RunEngine:        reply.EngineName,
+		Platform:         reply.Platform,
+		Cache:            reply.Cache,
+		Push:             req.Push,
+		NoCache:          req.NoCache,
+		Jobs:             int(reply.Jobs),
+		StageParallelism: int(reply.StageParallelism),
+		Dir:              req.Dir,
+		BuildDir:         filepath.Join(buildDir(req.Dir), ".build"),
 	}
 
 	// Render Containerfiles via deploykit.Generator (the render DRIVE, #67).
@@ -88,8 +93,8 @@ func runBoxBuild(ctx context.Context, ex *sdk.Executor, req spec.BuildRequest) (
 	}
 
 	// Privileged builder-bootstrap for every `from: builder:` image in the set, staged up
-	// front (matches the former host-side pre-pass ordering) before the podman build loop.
-	if err := bootstrapImages(ctx, ex, buildDir(req.Dir), cfg.EngineName, reply.Boxes); err != nil {
+	// front (matches the former host-side pre-pass ordering) before the build loop.
+	if err := bootstrapImages(ctx, ex, buildDir(req.Dir), cfg.RunEngine, reply.Boxes); err != nil {
 		return nil, err
 	}
 
@@ -101,15 +106,9 @@ func runBoxBuild(ctx context.Context, ex *sdk.Executor, req spec.BuildRequest) (
 	// the next status run re-fetches the fresh list instead of serving a stale one.
 	kit.InvalidateImageCache()
 
-	// Push after merge (Podman only; Docker buildx pushes during build).
-	if cfg.Push && cfg.EngineName == "podman" {
-		fmt.Fprintf(os.Stderr, "\n=== Pushing images ===\n")
-		for _, box := range builtBoxes {
-			if err := pushImage(cfg.Dir, imageTags(box)); err != nil {
-				return nil, err
-			}
-		}
-	}
+	// No push step here any more: a --push build pushes DURING each image's build (BuildKit's
+	// image exporter, one path for every platform), and the driver split it replaces — docker
+	// buildx pushing inline vs podman manifest-pushing afterwards — is deleted with the drivers.
 
 	built := make([]string, 0, len(builtBoxes))
 	for _, box := range builtBoxes {
@@ -154,7 +153,7 @@ func (c driveConfig) buildImages(ctx context.Context, ex *sdk.Executor, reply sp
 		// Filtered build: sequential dependency order.
 		for _, name := range reply.Order {
 			box := boxByName[name]
-			if err := c.buildImage(box, containerfiles[name]); err != nil {
+			if err := c.buildImage(ctx, box, containerfiles[name]); err != nil {
 				return nil, fmt.Errorf("building %s: %w", name, err)
 			}
 			built = append(built, box)
@@ -178,7 +177,7 @@ func (c driveConfig) buildImages(ctx context.Context, ex *sdk.Executor, reply sp
 			// Single image, no need for goroutine overhead.
 			name := level[0]
 			box := boxByName[name]
-			if err := c.buildImage(box, containerfiles[name]); err != nil {
+			if err := c.buildImage(ctx, box, containerfiles[name]); err != nil {
 				return nil, fmt.Errorf("building %s: %w", name, err)
 			}
 		} else {
@@ -188,7 +187,7 @@ func (c driveConfig) buildImages(ctx context.Context, ex *sdk.Executor, reply sp
 			for _, name := range level {
 				box := boxByName[name]
 				g.Go(func() error {
-					if err := c.buildImage(box, containerfiles[name]); err != nil {
+					if err := c.buildImage(ctx, box, containerfiles[name]); err != nil {
 						return fmt.Errorf("building %s: %w", name, err)
 					}
 					return nil
@@ -222,7 +221,7 @@ func (c driveConfig) buildImages(ctx context.Context, ex *sdk.Executor, reply sp
 func (c driveConfig) mergeBox(ctx context.Context, ex *sdk.Executor, box spec.BuildResolveBox) {
 	reqJSON, err := json.Marshal(spec.MergeRequest{
 		ImageRef:   box.FullTag,
-		Engine:     c.EngineName,
+		Engine:     c.RunEngine,
 		MaxMB:      int(box.MergeMaxMB),
 		MaxTotalMB: int(box.MergeMaxTotalMB),
 	})

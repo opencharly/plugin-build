@@ -1,7 +1,7 @@
 plugin-build:
     candy:
         description: |-
-            The BUILD-DRIVE plugin: it OWNS the podman build drive (the build-order loop, the
+            The BUILD-DRIVE plugin: it OWNS the build drive — BuildKit is the builder (the build-order loop, the
             per-image build lock, the push, and the merge gate) for `build:box` (the `charly box
             build` engine) and `build:generate` (the `charly box generate` engine), AND the
             ensure-image ORCHESTRATION for `build:ensure` (core-min wave 3, build-engine cluster
@@ -36,7 +36,7 @@ plugin-build:
                 - build:generate
                 - build:ensure
         plan:
-            - check: the build-drive plugin ships a buildable Go module the host compiles in (default) or serves out-of-process; its build:box / build:generate / build:ensure words own the podman build drive + the ensure-image orchestration and resolve/merge over the F10 HostBuild seam, exercised by EVERY box build and every image-ensure fallback across the whole ecosystem (every `charly box build` / `charly box generate` / `charly box pull` / deploy image-preflight invocation)
+            - check: the build-drive plugin ships a buildable Go module the host compiles in (default) or serves out-of-process; its build:box / build:generate / build:ensure words own the build drive (BuildKit via the buildkitdrive kit, bridged into the run engine's store) + the ensure-image orchestration and resolve/merge over the F10 HostBuild seam, exercised by EVERY box build and every image-ensure fallback across the whole ecosystem (every `charly box build` / `charly box generate` / `charly box pull` / deploy image-preflight invocation)
               id: build-drive-module-present
               context:
                 - build
