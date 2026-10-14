@@ -23,5 +23,5 @@
 	cache?:            string
 	no_cache?:         bool
 	jobs?:             int
-	podman_jobs?:      int
+	stage_parallelism?: int
 }

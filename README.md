@@ -1,10 +1,12 @@
 # plugin-build
 
-The build drive for OpenCharly — it owns the podman build engine behind
+The build drive for OpenCharly — it owns the BuildKit build behind
 `charly box build`, `charly box generate`, and the ensure-image orchestration.
 
-The plugin OWNS the podman build drive (the build-order loop, the per-image
-build lock, the push, and the merge gate) for `build:box` and `build:generate`,
+The plugin OWNS the build drive (the build-order loop, the per-image build
+lock, the push, and the merge gate) for `build:box` and `build:generate`,
+building through the `buildkitdrive` kit and bridging each image into the run
+engine's store,
 plus the ensure-image orchestration for `build:ensure`. It runs the heavy
 loader/render resolve **plugin-side itself**, reaching the host only for what a
 SDK-only candy structurally cannot do (the bootstrap-delicate local scan, the
@@ -41,7 +43,7 @@ charly box pull my-image
 ## Layout
 
 - `candy/plugin-build/` — the plugin module: `plugin.go` (provider + meta),
-  `drive.go`, `resolve*.go`, `render.go`, `podman.go`, `ensure.go`,
+  `drive.go`, `resolve*.go`, `render.go`, `buildkit.go`, `ensure.go`,
   `host_prep.go`, `bootstrap.go`, `schema/build.cue`, `cmd/serve/main.go`.
 - `candy/plugin-build/charly.yml` — the `plugin-build:` candy entity (`plugin:`
   block, `plan:` check).

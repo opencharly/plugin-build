@@ -67,10 +67,12 @@ func runBoxEnsure(ctx context.Context, ex *sdk.Executor, req spec.BuildEnsureReq
 		return nil
 	}
 
-	// Tier 2: cross-engine transfer — faster than a network pull and works offline.
-	if req.BuildEngine != "" && req.BuildEngine != runEngine && kit.LocalImageExists(req.BuildEngine, req.Image) {
-		return kit.TransferImage(req.BuildEngine, runEngine, req.Image)
-	}
+	// The former Tier 2 — a cross-engine transfer (`<build engine> save` | `<run engine> load`)
+	// when the image sat in the BUILD engine's store and not the run engine's — is DELETED with
+	// the build engines themselves: there is one builder now, it is not an engine, and the kit's
+	// bridge (option (A)) already lands every built image in the RUN engine's store, which is the
+	// only store this path has ever read. The transfer's whole reason to exist was the two-store
+	// split, and the bridge is what closed it.
 
 	// Tier 3: resolve + pull + build-fallback.
 	return ensureViaResolveAndBuild(ctx, ex, req.Image, req.Dir)

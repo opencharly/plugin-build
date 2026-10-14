@@ -185,7 +185,7 @@ func createRemoteCandyCopies(buildDir string, candies map[string]spec.CandyReade
 }
 
 // ensureCharlyBinaryFresh rebuilds candy/charly/bin/charly when any image whose resolved candy
-// chain includes the `charly` candy is in scope for the current build. Without this, podman build
+// chain includes the `charly` candy is in scope for the current build. Without this, the build
 // would COPY whatever stale binary happens to live at candy/charly/bin/charly — silently baking
 // obsolete CLI behaviour into the image. Skipped (with a one-line warning) when `go` is not on PATH,
 // so an end-user with a packaged charly install does not see a hard error. Byte-identical to the

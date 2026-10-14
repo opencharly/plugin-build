@@ -18,7 +18,7 @@ import (
 // the plugin-side resolve (K3 U6) resolves WHICH builder def applies (a charly.yml lookup that needs the
 // live *Config/*BuilderConfig graph) and rides it back on the per-box descriptor
 // (From/BootstrapBuilderImage/DistroDef/BootstrapBuilder — the buildwire.cue #BuildResolveBox
-// extension), but the actual PRIVILEGED EXEC runs HERE, alongside the podman drive it was
+// extension), but the actual PRIVILEGED EXEC runs HERE, alongside the build drive it was
 // always adjacent to — the candy already owns buildkit.RunPrivileged (the RunPrivileged dedup
 // cutover) and every other dependency (buildkit.RenderBootstrapScript/BootstrapPackagesForBox/
 // RenderPacstrapExtraConf/RenderRuntimePacmanConf) is already sdk-importable.
@@ -38,7 +38,7 @@ func buildDir(reqDir string) string {
 }
 
 // bootstrapImages runs the privileged builder-bootstrap for every descriptor in buildSet that
-// declares a `from: builder:` source (d.From non-empty), BEFORE the podman build loop starts —
+// declares a `from: builder:` source (d.From non-empty), BEFORE the build loop starts —
 // mirrors the former host-side pre-pass ordering (every bootstrap staged up front, then the
 // build proceeds). Skips descriptors with no bootstrap source (the common case, d.From == "").
 func bootstrapImages(ctx context.Context, ex *sdk.Executor, dir, engine string, boxSet []spec.BuildResolveBox) error {
@@ -150,7 +150,7 @@ func runPrivilegedBootstrap(ctx context.Context, ex *sdk.Executor, dir, engine s
 // tag, BUILDING it on demand when it isn't in local storage (fully automatic — no manual
 // `charly box build <builder>` prerequisite). A ref containing "/" (a full registry ref) is
 // returned unchanged. The auto-build recurses through runBoxBuild directly (in-process — the
-// podman drive already lives in this candy, so no HostBuild/registry round-trip is needed for
+// build drive already lives in this candy, so no HostBuild/registry round-trip is needed for
 // the recursive build the way the former host-side helper needed dispatchBoxBuild).
 func ensureBuilderImageBuilt(ctx context.Context, ex *sdk.Executor, engine, builderRef string) (string, error) {
 	if strings.Contains(builderRef, "/") {
