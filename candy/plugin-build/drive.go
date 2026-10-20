@@ -39,6 +39,7 @@ type driveConfig struct {
 	StageParallelism int    // inner concurrency: the stages of ONE build, resolved host-side
 	Dir              string // project dir the build runs in
 	BuildDir         string // the generated `.build/` tree inside Dir
+	RegistryMirror   string // local charly OCI registry mirrored for ghcr.io/opencharly
 }
 
 // resolveBuild runs the build-engine RESOLVE PLUGIN-SIDE (K3 U6 inversion): resolveBuildEngine loads
@@ -79,11 +80,19 @@ func runBoxBuild(ctx context.Context, ex *sdk.Executor, req spec.BuildRequest) (
 		StageParallelism: int(reply.StageParallelism),
 		Dir:              req.Dir,
 		BuildDir:         filepath.Join(buildDir(req.Dir), ".build"),
+		// The local charly OCI registry the daemon mirrors ghcr.io to, so a base image
+		// built earlier in the same run resolves locally. Set by the deployment's build
+		// configuration; empty leaves the daemon's own resolution (upstream registry).
+		RegistryMirror: os.Getenv("CHARLY_BUILD_REGISTRY_MIRROR"),
 	}
 
 	// Render Containerfiles via deploykit.Generator (the render DRIVE, #67).
 	containerfiles, err := renderContainerfiles(ctx, ex, reply, req.Dir, req.DevLocalPkg)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := cfg.ensureLocalRegistry(ctx); err != nil {
 		return nil, err
 	}
 

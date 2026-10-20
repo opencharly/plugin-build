@@ -4,9 +4,12 @@ package build
 // this file no longer drives an engine at all.
 //
 // ⚑ One builder: BuildKit. The Containerfile is built by the buildkitdrive kit (daemon ensure +
-// `buildctl` argv + the store bridge), and the image is BRIDGED into the RUN engine's store,
-// because every later read of it — its capability labels, its deploy, its status, its inline
-// merge, `charly clean` — resolves it through the run engine, and the two stores are not shared.
+// `buildctl` argv), and the built image is STORED IN THE CONFIGURED CONTAINER BACKEND via the
+// SDK's LoadExport, because every later read of it — its capability labels, its deploy, its
+// status, its inline merge, `charly clean` — resolves it through that backend. Each built image
+// is ALSO pushed to the LOCAL CHARLY OCI REGISTRY under its FullTag, and the daemon mirrors
+// `ghcr.io/opencharly` to that registry (DaemonOptions.RegistryMirror), so the next stage's
+// `FROM <FullTag>` resolves an internal base locally instead of against the upstream registry.
 // The engine-named drivers this replaces ({podman|docker} build --layers, docker buildx --push,
 // podman build --manifest, the cache-arg matrix and the push retry ladder) are DELETED, which is
 // what closes plugin-build#29 by deletion: every cell of its engine×flag matrix belonged to one
@@ -17,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/opencharly/sdk/buildkitdrive"
 	"github.com/opencharly/sdk/kit"
@@ -62,6 +66,7 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	// `[worker.oci] max-parallelism`, applied when the daemon starts.
 	daemon, err := buildkitdrive.Ensure(ctx, buildkitdrive.ExecRunner{}, buildkitdrive.DaemonOptions{
 		MaxParallelism: c.StageParallelism,
+		RegistryMirror: c.RegistryMirror,
 	})
 	if err != nil {
 		return fmt.Errorf("preparing the builder for %s: %w", box.Name, err)
@@ -88,6 +93,14 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	if c.Push {
 		args = append(args, pushOutput(box.FullTag)...)
 	}
+	// The built image goes to the local charly OCI registry under the SAME tag the next
+	// stage's FROM names, so an internal base resolves locally through the daemon mirror
+	// instead of querying the upstream registry.
+	localRef := ""
+	if c.RegistryMirror != "" {
+		localRef = localRegistryRef(c.RegistryMirror, box.FullTag)
+		args = append(args, pushOutput(localRef)...)
+	}
 	fmt.Fprintf(os.Stderr, "\n--- Building %s ---\n", box.Name)
 
 	runner := buildkitdrive.ExecRunner{}
@@ -110,6 +123,16 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 		return fmt.Errorf("removing the export %s: %w", dest, err)
 	}
 	return nil
+}
+
+// localRegistryRef maps a built image onto the local charly OCI registry under the mirror
+// path the daemon resolves (ghcr.io/opencharly/<name>:<tag> -> <mirror>/opencharly/<name>:<tag>).
+func localRegistryRef(mirror, fullTag string) string {
+	path := fullTag
+	if i := strings.IndexByte(path, '/'); i >= 0 {
+		path = path[i+1:]
+	}
+	return mirror + "/" + path
 }
 
 // pushOutput returns the registry exporter a --push build adds.
