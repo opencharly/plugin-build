@@ -83,7 +83,7 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 		Context:       c.Dir,
 		Ref:           box.FullTag,
 		Addr:          daemon.Addr(),
-		Platforms:     box.Platforms,
+		Platforms:     buildPlatforms(c.Platform, box.Platforms),
 		NoCache:       c.NoCache,
 	}
 	args, err := build.Args(dest)
@@ -153,4 +153,22 @@ func pushOutput(ref string) []string {
 // do about it. It stays wrapped with %w so callers can still errors.Is/As the primitive's error.
 func imageBuildLockError(box spec.BuildResolveBox, err error) error {
 	return fmt.Errorf("acquiring the per-image build lock for %s (%s): %w — another charly process is building this image; wait for it to finish and re-run (the second build then re-uses the builder's cache)", box.Name, box.FullTag, err)
+}
+
+// buildPlatforms narrows a local solve to ONE platform.
+//
+// box.Platforms comes from cfg.Defaults.Platforms / img.Platforms. When a project declares no platforms the base
+// image's multi-arch manifest list expands into one build PER architecture — so a local build of a box based on
+// quay.io/fedora/fedora:43 builds both linux/amd64 and linux/arm64 for an image only ever run on this host. On a
+// host without arm64 emulation that cannot complete at all; with emulation registered it is several times the
+// work, and the second build stream is what pushes the process into the OOM killer.
+//
+// driveConfig.Platform is the drive's host-resolved single target ("empty on a push build"), so honouring it here
+// makes a local build single-platform while leaving a push build multi-arch exactly as before — no default is
+// changed for anyone who declares platforms or pushes.
+func buildPlatforms(single string, declared []string) []string {
+	if single != "" {
+		return []string{single}
+	}
+	return declared
 }
