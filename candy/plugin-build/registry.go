@@ -44,9 +44,8 @@ const (
 // through the CONFIGURED run engine — never a hardcoded one, because the drive resolves
 // RunEngine precisely so the operator's engine choice is honoured.
 //
-// `run --replace` is deliberate: the name is deterministic, so a leftover container from an
-// interrupted run must not block the next build, and nothing else is expected to own that
-// name (it is the drive's own registry, on the drive's own mirror address).
+// The deterministic name means a leftover container from an interrupted run must not block
+// the next build, so it is removed first (portably, see below) before the new one starts.
 func (c driveConfig) ensureLocalRegistry(ctx context.Context) error {
 	if c.RegistryMirror == "" {
 		return nil
@@ -58,8 +57,13 @@ func (c driveConfig) ensureLocalRegistry(ctx context.Context) error {
 	if registryAnswers(c.RegistryMirror) {
 		return nil
 	}
-	cmd := exec.CommandContext(ctx, container.EngineBinary(c.RunEngine), "run", "-d",
-		"--name", registryContainerName, "--replace",
+	engine := container.EngineBinary(c.RunEngine)
+	// Clear a leftover container of the deterministic name FIRST: `podman run --replace` is
+	// podman-only, so the portable form is an explicit remove. A "no such container" exit is
+	// expected and ignored; any other failure surfaces on the run below.
+	_ = exec.CommandContext(ctx, engine, "rm", "-f", registryContainerName).Run()
+	cmd := exec.CommandContext(ctx, engine, "run", "-d",
+		"--name", registryContainerName,
 		"-p", net.JoinHostPort(host, port)+":"+registryContainerPort,
 		registryImage)
 	if out, err := cmd.CombinedOutput(); err != nil {
