@@ -13,9 +13,11 @@ plugin-build:
             the host only for what a sdk-only candy structurally cannot do (the bootstrap-delicate
             local scan, the git fetch, the build-time plugin connect, the host-fs prep) over a small
             `buildengine-*` HostBuild leg family; the layer MERGE crosses to verb:oci via
-            InvokeProvider (no HostBuild("merge") seam). The candy then runs podman directly —
-            building each image (Containerfile piped over stdin), gating the inline merge on the
-            box's MergeAuto, and pushing (podman) after merge; build:generate renders the .build/
+            InvokeProvider (no HostBuild("merge") seam). Each stage is built with BuildKit and its
+            image is STORED IN THE CONFIGURED CONTAINER BACKEND (the SDK `LoadExport`), then pushed
+            to the LOCAL CHARLY OCI REGISTRY under the same FullTag, which the daemon mirrors
+            `ghcr.io/opencharly` to — so the next stage's `FROM` resolves an internal base locally,
+            never against the upstream registry. build:generate renders the .build/
             Containerfile tree in its own code (via sdk/deploykit, #67) and returns the written paths
             (no podman, no merge); build:ensure resolves a project-authored image identifier
             against charly.yml PLUGIN-SIDE (loaderkit.LoadUnified via the K1 loader reverse legs —
