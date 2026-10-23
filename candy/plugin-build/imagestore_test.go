@@ -183,7 +183,7 @@ func TestStoreAddCopiesBlobsAndKeepsOneEntryPerReference(t *testing.T) {
 	if err := annotateExport(first, ref, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := storeAdd(first, ref); err != nil {
+	if err := storeAdd(first, ref); err != nil {
 		t.Fatalf("storeAdd first: %v", err)
 	}
 	if digest, ok, err := storeLookup(ref); err != nil || !ok || digest != firstDigest {
@@ -194,7 +194,7 @@ func TestStoreAddCopiesBlobsAndKeepsOneEntryPerReference(t *testing.T) {
 	if err := annotateExport(second, ref, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := storeAdd(second, ref); err != nil {
+	if err := storeAdd(second, ref); err != nil {
 		t.Fatalf("storeAdd second: %v", err)
 	}
 	idx, err := readStoreIndex(dir)
@@ -267,7 +267,7 @@ func TestStoreLookupIgnoresTheTagOnlyAnnotation(t *testing.T) {
 func TestStoreAddRefusesAnUnnamedExport(t *testing.T) {
 	storeTempDir(t)
 	path, _ := writeExportFixture(t, "unnamed")
-	if _, err := storeAdd(path, "ghcr.io/opencharly/fedora:2026.296.1200"); err == nil {
+	if err := storeAdd(path, "ghcr.io/opencharly/fedora:2026.296.1200"); err == nil {
 		t.Fatal("storeAdd accepted an export with no io.containerd.image.name annotation")
 	}
 }

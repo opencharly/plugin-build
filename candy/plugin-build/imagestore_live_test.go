@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/opencharly/sdk/buildkitdrive"
@@ -123,9 +124,16 @@ func TestImageStore_AnnotationNamesTheImport_AndItsAbsenceDoesNot(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("stripping the control's naming annotation: %v", err)
 	}
-	if err := importExport(ctx, runner, "podman", controlTar, control); err == nil {
+	// Assert WHERE the control fails: the load must SUCCEED (the archive is valid) and the
+	// reference must fail to RESOLVE. An error from the load would prove nothing about naming.
+	cerr := importExport(ctx, runner, "podman", controlTar, control)
+	if cerr == nil {
 		t.Fatalf("an archive with NO %s annotation imported and reported %s resolvable — the "+
 			"annotation would not be what names the image", imageNameAnnotation, control)
+	}
+	if !strings.Contains(cerr.Error(), "not resolvable") {
+		t.Fatalf("the control failed BEFORE the reference check (%v) — the load, not the naming, "+
+			"is what failed, so this proves nothing", cerr)
 	}
 	if kit.LocalImageExists("podman", control) {
 		t.Fatalf("the unnamed control archive landed tagged as %s", control)

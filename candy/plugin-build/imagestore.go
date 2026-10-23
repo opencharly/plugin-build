@@ -18,6 +18,7 @@ package build
 
 import (
 	"archive/tar"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -115,17 +116,23 @@ func ensureLayout(dir string) error {
 	return writeFileAtomic(marker, []byte(imageStoreLayoutMarker))
 }
 
-// writeFileAtomic publishes data at dest through a UNIQUE temp file in dest's own directory, then
-// renames. Concurrent writers must never share a temp name, and a reader must never see a partial
-// index.
+// writeFileAtomic publishes data at dest through a unique temp file in dest's own directory.
 func writeFileAtomic(dest string, data []byte) error {
+	return copyFileAtomic(dest, bytes.NewReader(data))
+}
+
+// copyFileAtomic publishes a STREAM at dest through a unique temp file in dest's own directory,
+// then renames. Concurrent writers must never share a temp name, and a reader must never see a
+// partial index. The stream shape matters: a blob is copied layer by layer, and buffering a whole
+// layer in memory is not something an image build can afford.
+func copyFileAtomic(dest string, src io.Reader) error {
 	f, err := os.CreateTemp(filepath.Dir(dest), "."+filepath.Base(dest)+".*")
 	if err != nil {
 		return err
 	}
 	name := f.Name()
 	defer func() { _ = os.Remove(name) }() // no-op once the rename has consumed it
-	if _, err := f.Write(data); err != nil {
+	if _, err := io.Copy(f, src); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -325,43 +332,43 @@ func exportIndex(tarPath string) (*storeIndex, error) {
 // The blobs are content-addressed, so an existing blob is the same bytes and is left alone; the
 // index is the only mutable file and it is rewritten atomically under a cross-process lock (two
 // levels of a build write the store concurrently — see drive.go's errgroup).
-func storeAdd(tarPath, ref string) (string, error) {
+func storeAdd(tarPath, ref string) error {
 	dir, err := imageStoreDir()
 	if err != nil {
-		return "", err
+		return err
 	}
 	if err := ensureLayout(dir); err != nil {
-		return "", err
+		return err
 	}
 	exported, err := exportIndex(tarPath)
 	if err != nil {
-		return "", fmt.Errorf("read the OCI export index: %w", err)
+		return fmt.Errorf("read the OCI export index: %w", err)
 	}
 	if len(exported.Manifests) == 0 {
-		return "", fmt.Errorf("the OCI export %s carries no image manifest", tarPath)
+		return fmt.Errorf("the OCI export %s carries no image manifest", tarPath)
 	}
 	if exported.Manifests[0].Annotations[imageNameAnnotation] == "" {
 		// A store entry without the naming annotation is not addressable, which is the whole
 		// contract of this file — refuse rather than write a dangling entry.
-		return "", fmt.Errorf("the OCI export %s carries no %s annotation", tarPath, imageNameAnnotation)
+		return fmt.Errorf("the OCI export %s carries no %s annotation", tarPath, imageNameAnnotation)
 	}
 	if err := copyBlobsIntoStore(tarPath, dir); err != nil {
-		return "", err
+		return err
 	}
 
 	lockPath, err := storeLockPath()
 	if err != nil {
-		return "", err
+		return err
 	}
 	release, err := lock.AcquireFileLock(lockPath, true)
 	if err != nil {
-		return "", fmt.Errorf("lock the charly image store index: %w", err)
+		return fmt.Errorf("lock the charly image store index: %w", err)
 	}
 	defer func() { _ = release() }() // the release error carries nothing a caller can act on
 
 	idx, err := readStoreIndex(dir)
 	if err != nil {
-		return "", err
+		return err
 	}
 	kept := idx.Manifests[:0]
 	for _, m := range idx.Manifests {
@@ -373,12 +380,12 @@ func storeAdd(tarPath, ref string) (string, error) {
 	idx.Manifests = append(kept, exported.Manifests...)
 	data, err := json.Marshal(idx)
 	if err != nil {
-		return "", fmt.Errorf("render the charly image store index: %w", err)
+		return fmt.Errorf("render the charly image store index: %w", err)
 	}
 	if err := writeFileAtomic(storeIndexPath(dir), data); err != nil {
-		return "", fmt.Errorf("write the charly image store index: %w", err)
+		return fmt.Errorf("write the charly image store index: %w", err)
 	}
-	return exported.Manifests[0].Digest, nil
+	return nil
 }
 
 // copyBlobsIntoStore copies every `blobs/` entry of the archive into the layout, skipping blobs
@@ -414,11 +421,8 @@ func copyBlobsIntoStore(tarPath, dir string) error {
 		if merr := os.MkdirAll(filepath.Dir(dest), 0o755); merr != nil {
 			return merr
 		}
-		data, rerr := io.ReadAll(tr)
-		if rerr != nil {
-			return fmt.Errorf("read blob %s from %s: %w", name, tarPath, rerr)
-		}
-		if werr := writeFileAtomic(dest, data); werr != nil {
+		// STREAM the blob: a layer can be gigabytes, and the store must not hold one in memory.
+		if werr := copyFileAtomic(dest, tr); werr != nil {
 			return fmt.Errorf("write blob %s: %w", name, werr)
 		}
 	}
