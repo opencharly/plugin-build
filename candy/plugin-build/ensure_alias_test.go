@@ -25,7 +25,8 @@ import (
 // resolve was consulted and what error came back.
 func aliasOutcome(t *testing.T, image, produced string) (consulted bool, err error) {
 	t.Helper()
-	err = aliasBuiltImageOntoRequestedRef(context.Background(), image, func() string {
+	// "" means the default engine — the helper resolves the binary through the capability table.
+	err = aliasBuiltImageOntoRequestedRef(context.Background(), image, "", func() string {
 		consulted = true
 		return produced
 	})

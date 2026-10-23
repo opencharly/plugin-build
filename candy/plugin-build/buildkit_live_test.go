@@ -39,6 +39,10 @@ func TestBuildImage_LiveBuildsAndBridgesIntoTheRunEngine(t *testing.T) {
 		}
 	}
 
+	// A live run writes the CHARLY IMAGE STORE, so point it (and the index lock's state root) at
+	// temp dirs: a check must never mutate the operator's store.
+	liveStoreDir(t)
+
 	const (
 		name = "leg4live"
 		tag  = "localhost/leg4-live:2026.287.1200"
