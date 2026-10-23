@@ -155,7 +155,7 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	if err := annotateExport(dest, box.FullTag, created); err != nil {
 		return fmt.Errorf("naming the %s export: %w", box.Name, err)
 	}
-	if _, err := storeAdd(dest, box.FullTag); err != nil {
+	if err := storeAdd(dest, box.FullTag); err != nil {
 		return fmt.Errorf("storing %s in the charly image store: %w", box.Name, err)
 	}
 	if err := importExport(ctx, runner, c.RunEngine, dest, box.FullTag); err != nil {
