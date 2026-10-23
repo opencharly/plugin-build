@@ -13,19 +13,25 @@ plugin-build:
             the host only for what a sdk-only candy structurally cannot do (the bootstrap-delicate
             local scan, the git fetch, the build-time plugin connect, the host-fs prep) over a small
             `buildengine-*` HostBuild leg family; the layer MERGE crosses to verb:oci via
-            InvokeProvider (no HostBuild("merge") seam). Each stage is built with BuildKit and its
-            image is STORED IN THE CONFIGURED CONTAINER BACKEND (the SDK `LoadExport`), then pushed
-            to the LOCAL CHARLY OCI REGISTRY under the same FullTag, which the daemon mirrors
-            `ghcr.io/opencharly` to — so the next stage's `FROM` resolves an internal base locally,
-            never against the upstream registry. build:generate renders the .build/
+            InvokeProvider (no HostBuild("merge") seam). Each image is built with BuildKit, its
+            export NAMED with `io.containerd.image.name=<FullTag>`, written to the engine-neutral
+            CHARLY IMAGE STORE (one OCI layout at $XDG_DATA_HOME/charly/images, see imagestore.go),
+            and materialised into the configured container backend with NO tag step — the
+            annotation names the image on load. A parent box present in the store is supplied to
+            the solve as an `--oci-layout` named context (buildkitdrive.Build.OCILayouts), so a
+            box-on-box build does not reach the registry for it; each image is ALSO pushed to the
+            LOCAL CHARLY OCI REGISTRY under the same FullTag, which the daemon mirrors
+            `ghcr.io/opencharly` to, so any base the store does not hold resolves internally
+            rather than against the upstream registry. build:generate renders the .build/
             Containerfile tree in its own code (via sdk/deploykit, #67) and returns the written paths
             (no podman, no merge); build:ensure resolves a project-authored image identifier
             against charly.yml PLUGIN-SIDE (loaderkit.LoadUnified via the K1 loader reverse legs —
             no "box-ref-resolve" HostBuild seam, shed #55 coneK1 #8) and a remote
             @github.com/... identifier via HostBuild("remote-image-resolve", …) (git clone/cache
-            ONLY, then plugin-side resolve), then execs `podman pull`/`podman tag` directly (no
-            seam needed for that — same host, same privilege as the build drive's own podman exec).
-            Only the wire envelopes cross the seam; the podman exec happens IN the candy. COMPILED-IN (in the
+            ONLY, then plugin-side resolve), then pulls/tags through the resolved run engine's
+            binary from the engine capability table (no engine word literal, no seam needed —
+            same host, same privilege as the build drive).
+            Only the wire envelopes cross the seam; the engine exec happens IN the candy. COMPILED-IN (in the
             embedded compiled_plugins:) — `charly box build` / `charly box generate` / every
             dispatchBuildEnsure caller dispatch it IN-PROCESS, the host threading the reverse
             channel onto the Invoke context so HostBuild is reachable without a go-plugin broker.

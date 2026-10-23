@@ -44,6 +44,7 @@ import (
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/kit"
 	"github.com/opencharly/sdk/loaderkit"
+	"github.com/opencharly/spec/container"
 	"github.com/opencharly/spec/spec"
 )
 
@@ -52,10 +53,9 @@ func runBoxEnsure(ctx context.Context, ex *sdk.Executor, req spec.BuildEnsureReq
 	if req.Image == "" {
 		return fmt.Errorf("ensure-image: empty image identifier")
 	}
+	// An empty engine means "the default engine", which EngineBinary/EngineCapabilityFor resolve
+	// through the capability table — this file names no engine.
 	runEngine := req.RunEngine
-	if runEngine == "" {
-		runEngine = "podman"
-	}
 
 	// Tier 1: already present. Only matches a FULL ref (podman/docker "image exists" needs a
 	// real storage key — a bare short name never matches here); a short name's existence check
@@ -75,7 +75,7 @@ func runBoxEnsure(ctx context.Context, ex *sdk.Executor, req spec.BuildEnsureReq
 	// split, and the bridge is what closed it.
 
 	// Tier 3: resolve + pull + build-fallback.
-	return ensureViaResolveAndBuild(ctx, ex, req.Image, req.Dir)
+	return ensureViaResolveAndBuild(ctx, ex, req.Image, req.Dir, runEngine)
 }
 
 // ensureViaResolveAndBuild implements tier 3. A remote (@github.com/...) ref resolves via the
@@ -85,15 +85,15 @@ func runBoxEnsure(ctx context.Context, ex *sdk.Executor, req spec.BuildEnsureReq
 // directly, no host seam). Both branches mirror the deleted core ensure-image helper's algorithm
 // verbatim: check existence of the resolved ref, attempt a pull, and on failure fall back to a
 // build.
-func ensureViaResolveAndBuild(ctx context.Context, ex *sdk.Executor, image, dir string) error {
+func ensureViaResolveAndBuild(ctx context.Context, ex *sdk.Executor, image, dir, runEngine string) error {
 	stripped := kit.StripURLScheme(image)
 	if spec.IsRemoteImageRef(stripped) {
-		return ensureRemoteRef(ctx, ex, image, stripped)
+		return ensureRemoteRef(ctx, ex, image, stripped, runEngine)
 	}
-	return ensureProjectRef(ctx, ex, image, dir)
+	return ensureProjectRef(ctx, ex, image, dir, runEngine)
 }
 
-func ensureRemoteRef(ctx context.Context, ex *sdk.Executor, image, stripped string) error {
+func ensureRemoteRef(ctx context.Context, ex *sdk.Executor, image, stripped, runEngine string) error {
 	rr, rerr := remoteImageResolve(ctx, ex, stripped, "")
 	if rerr != nil || rr.Error != "" {
 		errMsg := rr.Error
@@ -113,12 +113,12 @@ func ensureRemoteRef(ctx context.Context, ex *sdk.Executor, image, stripped stri
 	// where a remote box with no resolvable pull ref just built from source.
 	imageRef := resolveRemoteImageRef(ctx, ex, rr.CacheDir, rr.BoxName)
 	if imageRef != "" {
-		if kit.LocalImageExists("podman", imageRef) {
+		if kit.LocalImageExists(runEngine, imageRef) {
 			fmt.Fprintf(os.Stderr, "ensure-image: %s present\n", imageRef)
 			return nil
 		}
 		fmt.Fprintf(os.Stderr, "ensure-image: pulling %s\n", imageRef)
-		if err := podmanPull(ctx, imageRef); err == nil {
+		if err := enginePull(ctx, runEngine, imageRef); err == nil {
 			return nil
 		} else {
 			fmt.Fprintf(os.Stderr, "ensure-image: pull %s failed: %v\n", imageRef, err)
@@ -128,7 +128,7 @@ func ensureRemoteRef(ctx context.Context, ex *sdk.Executor, image, stripped stri
 	if _, berr := runBoxBuild(ctx, ex, spec.BuildRequest{Boxes: []string{rr.BoxName}, Dir: rr.CacheDir}); berr != nil {
 		return fmt.Errorf("ensure-image %q: pull failed and remote build failed: %w", image, berr)
 	}
-	return aliasBuiltImageOntoRequestedRef(ctx, image, func() string {
+	return aliasBuiltImageOntoRequestedRef(ctx, image, runEngine, func() string {
 		return resolveRemoteImageRef(ctx, ex, rr.CacheDir, rr.BoxName)
 	})
 }
@@ -151,10 +151,10 @@ func ensureRemoteRef(ctx context.Context, ex *sdk.Executor, image, stripped stri
 // A failed alias is a HARD error, not a warning: the caller cannot proceed without the ref, and a
 // warning here only relocates the failure to a downstream message that names neither this build
 // nor the alias.
-func aliasBuiltImageOntoRequestedRef(ctx context.Context, image string, resolveProduced func() string) error {
+func aliasBuiltImageOntoRequestedRef(ctx context.Context, image, runEngine string, resolveProduced func() string) error {
 	// A short-name input carries no tag to satisfy, and a build that already produced the exact
 	// requested ref needs nothing further.
-	if !kit.LooksLikeFullRef(image) || kit.LocalImageExists("podman", image) {
+	if !kit.LooksLikeFullRef(image) || kit.LocalImageExists(runEngine, image) {
 		return nil
 	}
 	produced := resolveProduced()
@@ -162,7 +162,7 @@ func aliasBuiltImageOntoRequestedRef(ctx context.Context, image string, resolveP
 		return fmt.Errorf("ensure-image %q: the build reported success but produced no local ref that satisfies it "+
 			"(resolved produced ref: %q) — the requested ref is still absent from local storage", image, produced)
 	}
-	if terr := podmanTag(ctx, produced, image); terr != nil {
+	if terr := engineTag(ctx, runEngine, produced, image); terr != nil {
 		return fmt.Errorf("ensure-image %q: tagging the built %s as the requested ref failed: %w", image, produced, terr)
 	}
 	fmt.Fprintf(os.Stderr, "ensure-image: tagged %s as %s\n", produced, image)
@@ -195,7 +195,7 @@ func resolveRemoteImageRef(ctx context.Context, ex *sdk.Executor, dir, boxName s
 	return kit.ResolveShellImageRef(registry, boxName, "")
 }
 
-func ensureProjectRef(ctx context.Context, ex *sdk.Executor, image, dir string) error {
+func ensureProjectRef(ctx context.Context, ex *sdk.Executor, image, dir, runEngine string) error {
 	// Plugin-side self-resolve (#55 coneK1 #8): load the project cfg via the K1 loader reverse
 	// legs + compute all 4 box-ref reply fields directly — NO "box-ref-resolve" HostBuild seam
 	// (deleted) and NO deploykit.ResolveSpecBox (the host-side deploykit call is shed from this
@@ -213,14 +213,14 @@ func ensureProjectRef(ctx context.Context, ex *sdk.Executor, image, dir string) 
 	existsRef := resolveImageRefPlugin(image, cfg)
 	fallbackShort := buildableShortNamePlugin(image, cfg)
 
-	if existsRef != "" && kit.LocalImageExists("podman", existsRef) {
+	if existsRef != "" && kit.LocalImageExists(runEngine, existsRef) {
 		fmt.Fprintf(os.Stderr, "ensure-image: %s present\n", existsRef)
 		return nil
 	}
 
 	if existsRef != "" {
 		fmt.Fprintf(os.Stderr, "ensure-image: pulling %s\n", existsRef)
-		if perr := podmanPull(ctx, existsRef); perr == nil {
+		if perr := enginePull(ctx, runEngine, existsRef); perr == nil {
 			return nil
 		} else {
 			fmt.Fprintf(os.Stderr, "ensure-image: pull %s failed: %v\n", existsRef, perr)
@@ -241,7 +241,7 @@ func ensureProjectRef(ctx context.Context, ex *sdk.Executor, image, dir string) 
 		return fmt.Errorf("ensure-image %q: pull failed and local build failed: %w", image, berr)
 	}
 
-	return aliasBuiltImageOntoRequestedRef(ctx, image, func() string {
+	return aliasBuiltImageOntoRequestedRef(ctx, image, runEngine, func() string {
 		return resolveImageRefPlugin(fallbackShort, cfg)
 	})
 }
@@ -354,19 +354,21 @@ func remoteImageResolve(ctx context.Context, ex *sdk.Executor, ref, tag string) 
 	return reply, nil
 }
 
-// podmanPull invokes `podman pull <ref>` on the local machine. Errors propagate verbatim; the
-// caller decides whether to fall back to a local build.
-func podmanPull(ctx context.Context, ref string) error {
-	cmd := exec.CommandContext(ctx, "podman", "pull", ref)
+// enginePull pulls a reference into the run engine. The binary comes from the capability table,
+// so this file names no engine; errors propagate verbatim and the caller decides whether to fall
+// back to a local build.
+func enginePull(ctx context.Context, runEngine, ref string) error {
+	cmd := exec.CommandContext(ctx, container.EngineBinary(runEngine), "pull", ref)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
-// podmanTag adds a second tag to an existing local image. Used to satisfy a tag-pinned input ref
-// after a local build produced a different (CalVer) tag of the same image.
-func podmanTag(ctx context.Context, src, dst string) error {
-	cmd := exec.CommandContext(ctx, "podman", "tag", src, dst)
+// engineTag adds a second tag to an existing local image. Used to satisfy a tag-pinned input ref
+// after a local build produced a different (CalVer) tag of the same image. The binary comes from
+// the capability table, so this file names no engine.
+func engineTag(ctx context.Context, runEngine, src, dst string) error {
+	cmd := exec.CommandContext(ctx, container.EngineBinary(runEngine), "tag", src, dst)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

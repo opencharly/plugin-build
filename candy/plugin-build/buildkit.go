@@ -4,12 +4,18 @@ package build
 // this file no longer drives an engine at all.
 //
 // ⚑ One builder: BuildKit. The Containerfile is built by the buildkitdrive kit (daemon ensure +
-// `buildctl` argv), and the built image is STORED IN THE CONFIGURED CONTAINER BACKEND via the
-// SDK's LoadExport, because every later read of it — its capability labels, its deploy, its
-// status, its inline merge, `charly clean` — resolves it through that backend. Each built image
-// is ALSO pushed to the LOCAL CHARLY OCI REGISTRY under its FullTag, and the daemon mirrors
-// `ghcr.io/opencharly` to that registry (DaemonOptions.RegistryMirror), so the next stage's
-// `FROM <FullTag>` resolves an internal base locally instead of against the upstream registry.
+// `buildctl` argv). The export is NAMED with `io.containerd.image.name=<FullTag>`, written to the
+// CHARLY IMAGE STORE (one engine-neutral OCI layout at $XDG_DATA_HOME/charly/images — see
+// imagestore.go), and then materialised into the run engine, because every later read of it — its
+// capability labels, its deploy, its status, its inline merge, `charly clean` — resolves it
+// through that engine. The import needs NO tag step: the annotation names the image (measured on
+// podman/docker/nerdctl), and the import verifies the reference resolves.
+//
+// A parent box that is present in the charly image store is bound to the daemon as an OCI layout
+// named context, so a box-on-box build never reaches the registry for it. Each built image is ALSO
+// pushed to the LOCAL CHARLY OCI REGISTRY under its FullTag, and the daemon mirrors
+// `ghcr.io/opencharly` to that registry (DaemonOptions.RegistryMirror), so any base the store does
+// not hold resolves internally instead of against the upstream registry.
 // The engine-named drivers this replaces ({podman|docker} build --layers, docker buildx --push,
 // podman build --manifest, the cache-arg matrix and the push retry ladder) are DELETED, which is
 // what closes plugin-build#29 by deletion: every cell of its engine×flag matrix belonged to one
@@ -21,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/opencharly/sdk/buildkitdrive"
 	"github.com/opencharly/sdk/kit"
@@ -86,9 +93,37 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 		Platforms:     buildPlatforms(c.Platform, box.Platforms),
 		NoCache:       c.NoCache,
 	}
+
+	// A parent box built LOCALLY is supplied from the charly image store, not the registry: the
+	// daemon is handed the store as an OCI layout and the base reference is bound to the parent's
+	// manifest digest as a NAMED CONTEXT, which is the one form the dockerfile frontend resolves
+	// from buildkit's `--oci-layout` store (measured — `FROM oci-layout://` itself is not a valid
+	// dockerfile reference). The registry stays the fallback: when the base is absent from the
+	// store, nothing is bound and the daemon resolves the reference normally.
+	baseRef := containerfileBaseRef(containerfile)
+	baseDigest := ""
+	if baseRef != "" {
+		storeDir, serr := imageStoreDir()
+		if serr != nil {
+			return serr
+		}
+		digest, found, serr := storeLookup(baseRef)
+		if serr != nil {
+			return serr
+		}
+		if found {
+			baseDigest = digest
+			build.OCILayouts = []buildkitdrive.OCILayout{{ID: imageStoreID, Dir: storeDir}}
+			fmt.Fprintf(os.Stderr, "--- %s: base %s from the charly image store ---\n", box.Name, baseRef)
+		}
+	}
+
 	args, err := build.Args(dest)
 	if err != nil {
 		return err
+	}
+	if baseDigest != "" {
+		args = append(args, "--opt", "context:"+baseRef+"=oci-layout://"+imageStoreID+"@"+baseDigest)
 	}
 	if c.Push {
 		args = append(args, pushOutput(box.FullTag)...)
@@ -108,12 +143,23 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 		return fmt.Errorf("building %s: %w", box.Name, err)
 	}
 
-	// The bridge: load, tag, and VERIFY the reference resolves. The tag re-application is a named
-	// duty of the kit's LoadExport, not a caveat — a load returns success while landing an
-	// OCI-exported image UNTAGGED, so without it the CalVer ref would resolve to nothing and every
-	// downstream verb would break.
-	if err := buildkitdrive.LoadExport(ctx, runner, container.EngineBinary(c.RunEngine), dest, box.FullTag); err != nil {
-		return fmt.Errorf("bridging %s into the %s store: %w", box.Name, c.RunEngine, err)
+	// Name the archive, then make the image durable in the charly image store, then materialise it
+	// into the run engine.
+	//
+	// ⚑ There is NO tag step. The export is annotated with `io.containerd.image.name=<FullTag>`
+	// BEFORE the import, and every engine measured applies that annotation on load — so the
+	// reference resolves because of the annotation, not because a second command re-applied it.
+	// The import VERIFIES the reference resolves, so a stripped annotation cannot pass for a
+	// successful build.
+	created := time.Now().UTC()
+	if err := annotateExport(dest, box.FullTag, created); err != nil {
+		return fmt.Errorf("naming the %s export: %w", box.Name, err)
+	}
+	if _, err := storeAdd(dest, box.FullTag); err != nil {
+		return fmt.Errorf("storing %s in the charly image store: %w", box.Name, err)
+	}
+	if err := importExport(ctx, runner, c.RunEngine, dest, box.FullTag); err != nil {
+		return fmt.Errorf("importing %s into the %s store: %w", box.Name, c.RunEngine, err)
 	}
 
 	// The export is a full copy of the image, and keeping one per build on a persistent root is
@@ -121,6 +167,30 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	// succeeded — and a failure to remove it is REPORTED, never swallowed.
 	if err := os.Remove(dest); err != nil {
 		return fmt.Errorf("removing the export %s: %w", dest, err)
+	}
+	return nil
+}
+
+// importExport materialises an ANNOTATED OCI archive into the run engine and proves the reference
+// resolves.
+//
+// The engine binary and the existence probe both come from the capability table, never from a
+// literal in this file: every engine measured takes `<binary> load -i <archive>` and exposes a
+// table-provided probe (`image exists` / `image inspect`), so the drive names no engine. No `tag`
+// step follows the load — the archive's `io.containerd.image.name` annotation is what names the
+// image, and the probe below is what proves it did.
+func importExport(ctx context.Context, r buildkitdrive.Runner, runEngine, tarPath, ref string) error {
+	engine := container.EngineBinary(runEngine)
+	if _, err := r.Run(ctx, engine, "load", "-i", tarPath); err != nil {
+		return err
+	}
+	capability, ok := container.EngineCapabilityFor(runEngine)
+	if !ok || len(capability.ImageExistsArgv) == 0 {
+		return fmt.Errorf("the engine capability table carries no image-exists probe for %q", runEngine)
+	}
+	probe := append(append([]string{}, capability.ImageExistsArgv...), ref)
+	if _, err := r.Run(ctx, engine, probe...); err != nil {
+		return fmt.Errorf("the loaded image is not resolvable as %s — the archive's %s annotation is what names it: %w", ref, imageNameAnnotation, err)
 	}
 	return nil
 }

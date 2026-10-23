@@ -5,16 +5,22 @@ The build drive for OpenCharly — it owns the BuildKit build behind
 
 The plugin OWNS the build drive (the build-order loop, the per-image build
 lock, the push, and the merge gate) for `build:box` and `build:generate`,
-building through the `buildkitdrive` kit and bridging each image into the run
-engine's store,
+building through the `buildkitdrive` kit,
 plus the ensure-image orchestration for `build:ensure`. It runs the heavy
 loader/render resolve **plugin-side itself**, reaching the host only for what a
 SDK-only candy structurally cannot do (the bootstrap-delicate local scan, the
 git fetch, the build-time plugin connect, the host-fs prep) over a small
 `buildengine-*` `HostBuild` leg family. The layer merge crosses to `verb:oci`
-via `InvokeProvider`. The plugin then runs podman directly — building each image
-(Containerfile piped over stdin), gating the inline merge on the box's
-`MergeAuto`, and pushing after merge.
+via `InvokeProvider`.
+
+Each build's export is NAMED with `io.containerd.image.name=<FullTag>`, written
+to the **charly image store** — one engine-neutral OCI layout at
+`$XDG_DATA_HOME/charly/images` (override `CHARLY_IMAGE_STORE_DIR`) — and then
+materialised into the run engine. The import needs **no tag step**: the
+annotation names the image on load, and the drive verifies the reference
+resolves. A parent box present in the store is supplied to the solve as an
+`--oci-layout` named context, so a box-on-box build does not reach the registry
+for it.
 
 It is **compiled into charly** (listed in the embedded `compiled_plugins:`):
 `charly box build` / `charly box generate` / every `dispatchBuildEnsure` caller
@@ -43,8 +49,9 @@ charly box pull my-image
 ## Layout
 
 - `candy/plugin-build/` — the plugin module: `plugin.go` (provider + meta),
-  `drive.go`, `resolve*.go`, `render.go`, `buildkit.go`, `ensure.go`,
-  `host_prep.go`, `bootstrap.go`, `schema/build.cue`, `cmd/serve/main.go`.
+  `drive.go`, `resolve*.go`, `render.go`, `buildkit.go`, `imagestore.go`,
+  `ensure.go`, `host_prep.go`, `bootstrap.go`, `schema/build.cue`,
+  `cmd/serve/main.go`.
 - `candy/plugin-build/charly.yml` — the `plugin-build:` candy entity (`plugin:`
   block, `plan:` check).
 - `charly.yml` — the root project manifest (`discover: candy`).
