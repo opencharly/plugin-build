@@ -4,13 +4,11 @@ package build
 // `buildctl`, and a real image bridged into the run engine's store.
 //
 // ⚑ Why this lives in the module rather than as an assembled `charly box build`: the plugin is
-// COMPILED INTO charly, so assembling charly requires every pinned plugin to compile against the
-// new contract — and they have not all migrated yet (measured: `plugin-box` v0.2026272.2039 fails
-// on `spec.BuildRequest.PodmanJobs`, `rt.BuildEngine`, `spec.BoxConfig.PodmanJobs`). A live proof
-// that has to wait for four other repos would prove nothing about THIS change, so the drive is
-// driven directly here: `driveConfig.buildImage` is the whole changed path — daemon ensure, the
-// buildctl argv, the OCI export, and the bridge (load → tag → verify) — and it is invoked exactly
-// as `runBoxBuild` invokes it.
+// COMPILED INTO charly, so an assembled build couples this proof to every other pinned plugin's
+// release — the assembled build answers "does the whole product assemble", while this proof
+// answers "does THIS drive work". So the drive is driven directly here: `driveConfig.buildImage`
+// is the whole changed path — daemon ensure, the buildctl argv, the OCI export, and the bridge
+// (annotate → store → load → verify) — and it is invoked exactly as `runBoxBuild` invokes it.
 //
 // It SKIPS VISIBLY when the toolchain is absent (R8), and is never mocked: where the tools exist
 // it runs a real build.
@@ -68,11 +66,12 @@ func TestBuildImage_LiveBuildsAndBridgesIntoTheRunEngine(t *testing.T) {
 	}
 
 	// ⚑ THE BRIDGE'S NAMED DUTY, asserted where it matters: the reference must RESOLVE in the RUN
-	// engine's store. A load returns success while landing an OCI-exported image untagged, so this
-	// is the assertion that fails if the tag re-application is ever dropped — the failure mode the
-	// plan calls out as breaking every downstream verb.
+	// engine's store. A load returns success while landing an image the engine cannot resolve by
+	// reference, so this is the assertion that fails if the export's NAMING ANNOTATION is ever
+	// dropped — the failure mode imagestore_live_test.go proves from the other side, where an
+	// archive with the annotation stripped imports DANGLING.
 	if !kit.LocalImageExists("podman", tag) {
-		t.Fatalf("the built image is not resolvable as %s in the run engine's store — the tag duty failed", tag)
+		t.Fatalf("the built image is not resolvable as %s in the run engine's store — the naming annotation did not take", tag)
 	}
 
 	// And the READ PATH the bridge exists for: labels, read through the run engine, which shares
