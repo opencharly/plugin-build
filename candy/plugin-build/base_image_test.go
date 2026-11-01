@@ -6,9 +6,12 @@ package build
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/opencharly/sdk"
 )
 
 // TestBaseImageRef reads the exact string BuildKit will resolve out of the authored artifact — the
@@ -82,5 +85,67 @@ func TestEnsureBaseImage_PresentBaseIsANoOp(t *testing.T) {
 	c := driveConfig{RunEngine: "podman"} // no Ex: a lookup that reached the executor would fail here
 	if err := c.ensureBaseImage(context.Background(), cf); err != nil {
 		t.Errorf("ensureBaseImage(%q) with the base already local = %v, want nil (present is a no-op)", ref, err)
+	}
+}
+
+// TestEnsureBaseImage_RoutesAMissingBaseThroughTheEnsureContract is the arm round 1 asked for: a
+// base that is NOT local, on a drive that DOES hold an executor, must route through the ensure
+// contract with the ref, the project dir and the run engine the build will actually use — and a
+// failure from it must name the artifact, say it could not be fetched, and say no local build was
+// possible. The seam is swapped, so the DECISION is what is asserted; the contract's own behaviour
+// is `ensure.go`'s, proven by its own tests and by the live BuildKit run below.
+func TestEnsureBaseImage_RoutesAMissingBaseThroughTheEnsureContract(t *testing.T) {
+	const ref = "ghcr.io/opencharly/not-in-any-store:2026.288.0854"
+	orig := ensureBase
+	defer func() { ensureBase = orig }()
+
+	var got struct {
+		called bool
+		image  string
+		dir    string
+		engine string
+		ex     *sdk.Executor
+	}
+	ensureBase = func(ctx context.Context, ex *sdk.Executor, image, dir, runEngine string) error {
+		got.called, got.image, got.dir, got.engine, got.ex = true, image, dir, runEngine, ex
+		return errors.New("no recipe in this project, and the registry refused")
+	}
+
+	ex := &sdk.Executor{}
+	c := driveConfig{RunEngine: "podman", Dir: "/project/dir", Ex: ex}
+	cf := "ARG BASE_IMAGE=" + ref + "\n\nFROM ${BASE_IMAGE}\n"
+
+	err := c.ensureBaseImage(context.Background(), cf)
+	if !got.called {
+		t.Fatalf("a missing base with an executor present must reach the ensure contract; it did not")
+	}
+	if got.image != ref {
+		t.Errorf("ensure contract got image %q, want the Containerfile's base %q", got.image, ref)
+	}
+	if got.dir != "/project/dir" {
+		t.Errorf("ensure contract got dir %q, want the drive's project dir %q", got.dir, "/project/dir")
+	}
+	if got.engine != "podman" {
+		t.Errorf("ensure contract got run engine %q, want the drive's %q", got.engine, "podman")
+	}
+	if got.ex != ex {
+		t.Errorf("ensure contract got a different executor than the drive holds")
+	}
+	if err == nil {
+		t.Fatalf("a failed ensure must fail the build; got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{ref, "could not be fetched", "no local build was possible"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("failure %q must contain %q — it must name the artifact, the fetch, and the missing fallback", msg, want)
+		}
+	}
+}
+
+// TestEnsureBaseSeamIsWired guards the init() assignment: a nil seam would make every cold build
+// panic instead of ensuring its base, so the production wiring is asserted rather than assumed.
+func TestEnsureBaseSeamIsWired(t *testing.T) {
+	if ensureBase == nil {
+		t.Fatal("ensureBase seam is nil — the init() assignment is the only thing wiring the ensure contract")
 	}
 }

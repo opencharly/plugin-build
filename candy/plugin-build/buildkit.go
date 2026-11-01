@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/buildkitdrive"
 	"github.com/opencharly/sdk/kit"
 	"github.com/opencharly/spec/container"
@@ -46,6 +47,17 @@ func baseImageRef(containerfile string) string {
 	}
 	return ""
 }
+
+// ensureBase is the ensure CONTRACT as a package-level seam (a var for the same reason the other
+// seams in this module are): the resolving decision — which ref, which dir, which run engine, and
+// what a failure says — must be provable without a registry that cannot serve the base, which is the
+// venue charly#949 is about. Production assigns the real function.
+// It is assigned in init() rather than by a var initializer because the contract reaches BACK into
+// this drive (ensureRemoteRef -> runBoxBuild -> buildImage -> ensureBaseImage -> ensureBase), which a
+// var initializer turns into an initialization cycle the compiler refuses.
+var ensureBase func(ctx context.Context, ex *sdk.Executor, image, dir, runEngine string) error
+
+func init() { ensureBase = ensureViaResolveAndBuild }
 
 // ensureBaseImage makes an image's BASE present before BuildKit resolves it. A base that is not in
 // the run engine's store and cannot be fetched fails deep inside the build with the registry's own
@@ -67,7 +79,7 @@ func (c driveConfig) ensureBaseImage(ctx context.Context, containerfile string) 
 	if c.Ex == nil {
 		return fmt.Errorf("base image %s is not present locally and this drive holds no executor to resolve it, so it can neither be pulled nor built here", ref)
 	}
-	if err := ensureViaResolveAndBuild(ctx, c.Ex, ref, c.Dir, c.RunEngine); err != nil {
+	if err := ensureBase(ctx, c.Ex, ref, c.Dir, c.RunEngine); err != nil {
 		return fmt.Errorf("base image %s is not present locally, could not be fetched from its registry (%v), and no local build was possible for it: a registry ref whose recipe is not in this project cannot be built here — name the recipe in this project, or pull it once with a credential, and retry", ref, err)
 	}
 	fmt.Fprintf(os.Stderr, "ensure-image: base %s is now present\n", ref)
