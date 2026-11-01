@@ -29,11 +29,62 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/buildkitdrive"
 	"github.com/opencharly/sdk/kit"
 	"github.com/opencharly/spec/container"
 	"github.com/opencharly/spec/spec"
 )
+
+// baseImageRef reads the base reference the renderer emitted as the Containerfile's first ARG —
+// the exact string BuildKit will resolve, read from the artifact this drive itself just wrote, so
+// no new field has to carry it across the resolve/build boundary.
+func baseImageRef(containerfile string) string {
+	for _, line := range strings.Split(containerfile, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "ARG BASE_IMAGE="); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	return ""
+}
+
+// ensureBase is the ensure CONTRACT as a package-level seam (a var for the same reason the other
+// seams in this module are): the resolving decision — which ref, which dir, which run engine, and
+// what a failure says — must be provable without a registry that cannot serve the base, which is the
+// venue charly#949 is about. Production assigns the real function.
+// It is assigned in init() rather than by a var initializer because the contract reaches BACK into
+// this drive (ensureRemoteRef -> runBoxBuild -> buildImage -> ensureBaseImage -> ensureBase), which a
+// var initializer turns into an initialization cycle the compiler refuses.
+var ensureBase func(ctx context.Context, ex *sdk.Executor, image, dir, runEngine string) error
+
+func init() { ensureBase = ensureViaResolveAndBuild }
+
+// ensureBaseImage makes an image's BASE present before BuildKit resolves it. A base that is not in
+// the run engine's store and cannot be fetched fails deep inside the build with the registry's own
+// auth error — even when the recipe for that base is in this project — because `FROM ${BASE_IMAGE}`
+// is resolved by buildctl, never by charly. Present is a no-op; a miss routes through the SAME
+// ensure contract the build:ensure word owns (resolve against the project's charly.yml -> pull ->
+// build locally), and when no local build is possible the failure NAMES the base ref, that it could
+// not be fetched, and that no local build was possible — rather than returning a fetch status the
+// reader cannot act on (charly#949).
+func (c driveConfig) ensureBaseImage(ctx context.Context, containerfile string) error {
+	ref := baseImageRef(containerfile)
+	if ref == "" || ref == "scratch" {
+		return nil
+	}
+	if kit.LocalImageExists(c.RunEngine, ref) {
+		return nil // already local: nothing to fetch, nothing to build
+	}
+	fmt.Fprintf(os.Stderr, "ensure-image: base %s is not in local storage — ensuring it (resolve, pull, else build locally)\n", ref)
+	if c.Ex == nil {
+		return fmt.Errorf("base image %s is not present locally and this drive holds no executor to resolve it, so it can neither be pulled nor built here", ref)
+	}
+	if err := ensureBase(ctx, c.Ex, ref, c.Dir, c.RunEngine); err != nil {
+		return fmt.Errorf("base image %s is not present locally, could not be fetched from its registry (%v), and no local build was possible for it: a registry ref whose recipe is not in this project cannot be built here — name the recipe in this project, or pull it once with a credential, and retry", ref, err)
+	}
+	fmt.Fprintf(os.Stderr, "ensure-image: base %s is now present\n", ref)
+	return nil
+}
 
 // imageTags computes the tags for an image. charly is CalVer-only — it never emits `:latest`.
 // Every built image carries exactly its CalVer tag (box.FullTag, e.g.
@@ -77,6 +128,17 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	})
 	if err != nil {
 		return fmt.Errorf("preparing the builder for %s: %w", box.Name, err)
+	}
+
+	// ⚑ The base image is a build ARG that BuildKit resolves INSIDE `buildctl`
+	// (`ARG BASE_IMAGE=` + `FROM ${BASE_IMAGE}`, sdk/deploykit/generate.go), so this is the ONLY
+	// window in which charly can act on it — and the one place a cold local store turns a build
+	// that COULD run locally into a registry-fetch failure. Ensure the base first: present is a
+	// no-op; a miss routes through the SAME ensure contract `build:ensure` owns (resolve against
+	// the project's charly.yml -> pull -> build locally), so a recipe sitting in this very project
+	// is used instead of surfacing as the registry's auth error (charly#949).
+	if err := c.ensureBaseImage(ctx, containerfile); err != nil {
+		return err
 	}
 
 	stageDir, err := buildkitdrive.StageDir()

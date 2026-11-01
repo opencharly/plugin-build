@@ -40,6 +40,11 @@ type driveConfig struct {
 	Dir              string // project dir the build runs in
 	BuildDir         string // the generated `.build/` tree inside Dir
 	RegistryMirror   string // local charly OCI registry mirrored for ghcr.io/opencharly
+	// Ex is the executor the ensure contract needs. The drive resolves and builds entirely
+	// plugin-side, but a BASE image that is absent locally must be ensured through
+	// ensureViaResolveAndBuild (ensure.go), which takes one — and until now no drive path held
+	// one, which is why the build could fetch a base it was able to build and die fetching it.
+	Ex *sdk.Executor
 }
 
 // resolveBuild runs the build-engine RESOLVE PLUGIN-SIDE (K3 U6 inversion): resolveBuildEngine loads
@@ -84,6 +89,7 @@ func runBoxBuild(ctx context.Context, ex *sdk.Executor, req spec.BuildRequest) (
 		// built earlier in the same run resolves locally. Set by the deployment's build
 		// configuration; empty leaves the daemon's own resolution (upstream registry).
 		RegistryMirror: os.Getenv("CHARLY_BUILD_REGISTRY_MIRROR"),
+		Ex:             ex,
 	}
 
 	// Render Containerfiles via deploykit.Generator (the render DRIVE, #67).
