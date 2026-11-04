@@ -283,26 +283,26 @@ func pushOutput(ref string) []string {
 
 // pushTargets selects the images a --push build publishes.
 //
-// ⚑ "The requested box and any intermediate THIS build genuinely produced" — not "every image in
-// the resolved chain". The chain a filtered build resolves is the requested box PLUS its
-// transitive dependencies, and an `import:` dependency (`crabbox.pod-crabbox`, the CachyOS
-// `arch` under it) is a box from ANOTHER repo's project. Building it here is necessary when its
-// current tag is absent (the drive names it as a locally built base), but its package belongs to
-// that repo: pushing it with THIS repo's GITHUB_TOKEN is refused with
-// `denied: permission_denied: write_package` and takes the whole build — including the image the
-// user asked for — down with it (opencharly/.github#279, measured on pod-crabbox-systemd).
+// ⚑ The exclusion is FOREIGN PACKAGE OWNERSHIP, not "was this box requested". The chain a
+// filtered build resolves is the requested box PLUS its transitive dependencies. A dependency
+// that an `import:` namespace supplies (`crabbox.pod-crabbox`, the CachyOS `arch` under it) is a
+// box from ANOTHER repo's project. Building it here is necessary when its current tag is absent
+// (the drive names it as a locally built base), but its package belongs to that repo: pushing it
+// with THIS repo's GITHUB_TOKEN is refused with `denied: permission_denied: write_package` and
+// takes the whole build — including the image the user asked for — down with it
+// (opencharly/.github#279, measured on pod-crabbox-systemd).
 //
 // The push set is therefore:
 //   - every explicitly requested box (a request is an instruction; if the user explicitly asks
 //     for a foreign image the drive still attempts the push and its failure stays LOUD — the
 //     error is never weakened); plus
-//   - this project's own auto-intermediates (Auto), which are synthesized here and carry no
-//     foreign owner.
+//   - every box in this build's order that is NOT qualified by an `import:` namespace — the
+//     project's authored dependencies AND its auto-intermediates. An unqualified box is this
+//     project's own: its push creates or writes a package this repo's workflow owns.
 //
-// An imported namespace's boxes are QUALIFIED (`ns.name` — SplitNamespaceRef), so a dot marks a
-// box this project does not own. A FULL build (no requested boxes) publishes every unqualified
-// box it built; a filtered build publishes the requested set + own intermediates only, never an
-// unrequested authored dependency.
+// An imported namespace's boxes are QUALIFIED (`ns.name`, the one definition being
+// spec.SplitNamespaceRef), so qualification alone marks a box this project does not own. The same
+// rule serves a full build (every box it built is unqualified) and a filtered one.
 func pushTargets(req spec.BuildRequest, reply spec.BuildResolveReply) map[string]bool {
 	if !req.Push {
 		return nil
@@ -316,29 +316,18 @@ func pushTargets(req spec.BuildRequest, reply spec.BuildResolveReply) map[string
 		if importedNamespaceBox(b.Name) {
 			continue
 		}
-		if len(requested) == 0 || autoIntermediate(reply, b.Name) {
-			targets[b.Name] = true
-		}
+		targets[b.Name] = true
 	}
 	return targets
 }
 
 // importedNamespaceBox reports whether a resolved box name is qualified by an `import:`
-// namespace. Dots are the namespace separator (spec.SplitNamespaceRef); a box of THIS project is
-// always unqualified.
+// namespace. The namespace grammar has ONE definition — spec.SplitNamespaceRef, which returns
+// the namespace portion and the remainder — so this predicate cannot drift from the parser that
+// builds the qualified names in the first place.
 func importedNamespaceBox(name string) bool {
-	return strings.ContainsRune(name, '.')
-}
-
-// autoIntermediate reports whether the resolved box is one of the auto-generated intermediate
-// images this build synthesizes at a branching point (ResolvedBox.Auto), as opposed to an
-// authored box of either this project or an imported namespace.
-func autoIntermediate(reply spec.BuildResolveReply, name string) bool {
-	if reply.ResolvedProject == nil {
-		return false
-	}
-	view, ok := reply.ResolvedProject.Boxes[name]
-	return ok && view.Auto
+	ns, _, ok := spec.SplitNamespaceRef(name)
+	return ok && ns != ""
 }
 
 // pushOutputFor returns the registry exporter this image's build adds, nil when the image must
