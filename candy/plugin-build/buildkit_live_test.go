@@ -28,14 +28,7 @@ import (
 )
 
 func TestBuildImage_LiveBuildsAndBridgesIntoTheRunEngine(t *testing.T) {
-	if testing.Short() {
-		t.Skip("live build: needs the BuildKit toolchain and a container runtime")
-	}
-	for _, tool := range []string{"rootlesskit", "buildkitd", "buildctl", "podman"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			t.Skipf("%s not installed — skipping the live build drive proof: %v", tool, err)
-		}
-	}
+	liveTools(t, "rootlesskit", "buildkitd", "buildctl", "podman")
 
 	// A live run writes the CHARLY IMAGE STORE, so point it (and the index lock's state root) at
 	// temp dirs: a check must never mutate the operator's store.
@@ -97,5 +90,54 @@ func TestBuildImage_LiveBuildsAndBridgesIntoTheRunEngine(t *testing.T) {
 				t.Errorf("the export archive %s survived the build", e.Name())
 			}
 		}
+	}
+}
+
+// TestBuildImage_LivePushOutsideTargetsIsNotPublished — the LIVE guard for
+// opencharly/.github#279: a `--push` build publishes only the images this build produced for
+// THIS project.
+//
+// The image built here is DELIBERATELY outside PushTargets, exactly like an imported `base:`
+// that the build had to build locally. Before the fix the drive appended the registry exporter
+// for every built image, so this real build tried to push `localhost/leg4-live-push-279:<tag>`
+// (nothing serves that registry) and FAILED. After the fix no registry exporter is added, the
+// same real BuildKit build completes, and the image is still bridged into the run engine's store
+// — that is the assertion below.
+//
+// The positive half (a requested box DOES receive the exporter) is pinned in
+// push_targets_test.go; the registry-side witness is the consumer's post-merge image run.
+func TestBuildImage_LivePushOutsideTargetsIsNotPublished(t *testing.T) {
+	liveTools(t, "rootlesskit", "buildkitd", "buildctl", "podman")
+	liveStoreDir(t)
+
+	const (
+		name = "push279live"
+		// Nothing serves port 1, so the OLD unconditional-exporter behaviour fails the build
+		// deterministically — no local registry on :80 can make this guard pass by accident. The
+		// name deliberately does not carry the sibling live test's `leg4-live` prefix: that test
+		// scans the shared stage dir for leftovers whose name contains it.
+		tag = "127.0.0.1:1/push279-live:2026.308.1917"
+	)
+	dir := t.TempDir()
+	cfile := "FROM alpine:3.20\n" +
+		"LABEL ai.opencharly.pushproof=279\n" +
+		"CMD [\"/bin/true\"]\n"
+
+	cfg := driveConfig{
+		RunEngine:   "podman",
+		Dir:         dir,
+		BuildDir:    filepath.Join(dir, ".build"),
+		Push:        true,
+		PushTargets: map[string]bool{}, // this image is built, not published
+	}
+	box := spec.BuildResolveBox{Name: name, FullTag: tag}
+
+	defer exec.Command("podman", "rmi", "-f", tag).Run() //nolint:errcheck
+
+	if err := cfg.buildImage(context.Background(), box, cfile); err != nil {
+		t.Fatalf("a built image outside the push targets must be built without a registry push: %v", err)
+	}
+	if !kit.LocalImageExists("podman", tag) {
+		t.Fatalf("the non-target image was not bridged into the %s store — the build did not complete", cfg.RunEngine)
 	}
 }

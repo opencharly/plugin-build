@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/opencharly/sdk"
+	"github.com/opencharly/sdk/buildkit"
 	"github.com/opencharly/sdk/buildkitdrive"
 	"github.com/opencharly/sdk/kit"
 	"github.com/opencharly/spec/container"
@@ -187,9 +188,10 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	if baseDigest != "" {
 		args = append(args, "--opt", "context:"+baseRef+"=oci-layout://"+imageStoreID+"@"+baseDigest)
 	}
-	if c.Push {
-		args = append(args, pushOutput(box.FullTag)...)
-	}
+	// Only the images THIS build genuinely produced for THIS project are published; see
+	// pushTargets + pushOutputFor. An imported `import:` namespace's base is built here but its
+	// package is the importing repo's token's to write, not ours (opencharly/.github#279).
+	args = append(args, c.pushOutputFor(box)...)
 	// The built image goes to the local charly OCI registry under the SAME tag the next
 	// stage's FROM names, so an internal base resolves locally through the daemon mirror
 	// instead of querying the upstream registry.
@@ -277,6 +279,76 @@ func localRegistryRef(mirror, fullTag string) string {
 // the build itself stays with the kind-blind kit.
 func pushOutput(ref string) []string {
 	return []string{"--output", "type=image,name=" + ref + ",push=true"}
+}
+
+// pushTargets selects the images a --push build publishes.
+//
+// ⚑ "The requested box and any intermediate THIS build genuinely produced" — not "every image in
+// the resolved chain". The chain a filtered build resolves is the requested box PLUS its
+// transitive dependencies, and an `import:` dependency (`crabbox.pod-crabbox`, the CachyOS
+// `arch` under it) is a box from ANOTHER repo's project. Building it here is necessary when its
+// current tag is absent (the drive names it as a locally built base), but its package belongs to
+// that repo: pushing it with THIS repo's GITHUB_TOKEN is refused with
+// `denied: permission_denied: write_package` and takes the whole build — including the image the
+// user asked for — down with it (opencharly/.github#279, measured on pod-crabbox-systemd).
+//
+// The push set is therefore:
+//   - every explicitly requested box (a request is an instruction; if the user explicitly asks
+//     for a foreign image the drive still attempts the push and its failure stays LOUD — the
+//     error is never weakened); plus
+//   - this project's own auto-intermediates (Auto), which are synthesized here and carry no
+//     foreign owner.
+//
+// An imported namespace's boxes are QUALIFIED (`ns.name` — SplitNamespaceRef), so a dot marks a
+// box this project does not own. A FULL build (no requested boxes) publishes every unqualified
+// box it built; a filtered build publishes the requested set + own intermediates only, never an
+// unrequested authored dependency.
+func pushTargets(req spec.BuildRequest, reply spec.BuildResolveReply) map[string]bool {
+	if !req.Push {
+		return nil
+	}
+	requested := buildkit.NormalizeBoxArgs(req.Boxes)
+	targets := make(map[string]bool, len(reply.Boxes))
+	for _, name := range requested {
+		targets[name] = true
+	}
+	for _, b := range reply.Boxes {
+		if importedNamespaceBox(b.Name) {
+			continue
+		}
+		if len(requested) == 0 || autoIntermediate(reply, b.Name) {
+			targets[b.Name] = true
+		}
+	}
+	return targets
+}
+
+// importedNamespaceBox reports whether a resolved box name is qualified by an `import:`
+// namespace. Dots are the namespace separator (spec.SplitNamespaceRef); a box of THIS project is
+// always unqualified.
+func importedNamespaceBox(name string) bool {
+	return strings.ContainsRune(name, '.')
+}
+
+// autoIntermediate reports whether the resolved box is one of the auto-generated intermediate
+// images this build synthesizes at a branching point (ResolvedBox.Auto), as opposed to an
+// authored box of either this project or an imported namespace.
+func autoIntermediate(reply spec.BuildResolveReply, name string) bool {
+	if reply.ResolvedProject == nil {
+		return false
+	}
+	view, ok := reply.ResolvedProject.Boxes[name]
+	return ok && view.Auto
+}
+
+// pushOutputFor returns the registry exporter this image's build adds, nil when the image must
+// not be published. The decision is the whole point: `--push` is a request to publish THIS
+// project's output, not a licence to write every package in the resolved chain.
+func (c driveConfig) pushOutputFor(box spec.BuildResolveBox) []string {
+	if !c.Push || !c.PushTargets[box.Name] {
+		return nil
+	}
+	return pushOutput(box.FullTag)
 }
 
 // imageBuildLockError renders the per-image build-lock failure. The primitive names the HOLDER
