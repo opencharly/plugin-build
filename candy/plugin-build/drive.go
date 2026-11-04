@@ -34,8 +34,9 @@ type driveConfig struct {
 	Platform  string // target platform (host-resolved; empty on a push build)
 	Cache     string // resolved --cache mode
 	Push      bool   // --push
-	// PushTargets is the set of image NAMES a --push build publishes: the boxes this build
-	// genuinely produced FOR THIS PROJECT (the requested box + this project's auto-intermediates).
+	// PushTargets is the set of image NAMES a --push build publishes: every box this build
+	// produced FOR THIS PROJECT -- the explicitly requested box, this project's unqualified
+	// authored dependencies, and its auto-intermediates.
 	// A box an `import:` namespace supplies is built locally when the build needs it (its current
 	// tag may not exist yet), but its package belongs to the repo that sources it, so this repo's
 	// token cannot write it and must not try (opencharly/.github#279). Empty when Push is false.
