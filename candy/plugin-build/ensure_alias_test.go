@@ -90,3 +90,72 @@ func TestAliasBuiltImage_FullRefPredicateSeparatesTheCases(t *testing.T) {
 		t.Error("a bare short name must NOT read as a full ref")
 	}
 }
+
+// TestBuildEngineFor pins the run-engine override the local build fallback needs: the
+// build:resolve reply names the HOST runtime engine, but a build:ensure caller that asked
+// for a different run engine must have the build bridge its OCI export into THAT engine's
+// store. Without the override a locally-built image lands in podman and the deploy that
+// asked for containerd never finds it (the alias fails `image "...": not found`).
+func TestBuildEngineFor(t *testing.T) {
+	cases := []struct {
+		name      string
+		resolved  string
+		requested string
+		want      string
+	}{
+		{"requested run engine wins", "podman", "containerd", "containerd"},
+		{"empty requested keeps the resolved engine", "podman", "", "podman"},
+		{"both empty stays empty", "", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := buildEngineFor(tc.resolved, tc.requested); got != tc.want {
+				t.Fatalf("buildEngineFor(%q, %q) = %q, want %q", tc.resolved, tc.requested, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuiltRefForBox pins the produced-ref source: the build drive's returned FullTags are
+// authoritative. Re-resolving from a local store reads the default engine's store (wrong once
+// the run engine is overridden) and can return the requested prefixed bed tag itself.
+func TestBuiltRefForBox(t *testing.T) {
+	cases := []struct {
+		name  string
+		built []string
+		box   string
+		want  string
+	}{
+		{
+			name:  "single built ref for the requested box",
+			built: []string{"ghcr.io/opencharly/probe-engine-image:2026.309.1953"},
+			box:   "probe-engine-image",
+			want:  "ghcr.io/opencharly/probe-engine-image:2026.309.1953",
+		},
+		{
+			name:  "picks the matching box out of several",
+			built: []string{"ghcr.io/opencharly/other:2026.309.1953", "ghcr.io/opencharly/probe-engine-image:2026.309.1953"},
+			box:   "probe-engine-image",
+			want:  "ghcr.io/opencharly/probe-engine-image:2026.309.1953",
+		},
+		{
+			name:  "single ref with a registry-namespaced leaf still matches",
+			built: []string{"ghcr.io/opencharly/probe-engine-image:2026.309.1953"},
+			box:   "opencharly/probe-engine-image",
+			want:  "ghcr.io/opencharly/probe-engine-image:2026.309.1953",
+		},
+		{
+			name:  "nothing built",
+			built: nil,
+			box:   "probe-engine-image",
+			want:  "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := builtRefForBox(tc.built, tc.box); got != tc.want {
+				t.Fatalf("builtRefForBox(%v, %q) = %q, want %q", tc.built, tc.box, got, tc.want)
+			}
+		})
+	}
+}

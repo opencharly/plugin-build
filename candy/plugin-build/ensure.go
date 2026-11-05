@@ -34,6 +34,7 @@ package build
 // and the podman pull/tag exec are pure sdk/kit + os/exec.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -125,11 +126,12 @@ func ensureRemoteRef(ctx context.Context, ex *sdk.Executor, image, stripped, run
 		}
 	}
 	fmt.Fprintf(os.Stderr, "ensure-image: building remote %s from cached source\n", image)
-	if _, berr := runBoxBuild(ctx, ex, spec.BuildRequest{Boxes: []string{rr.BoxName}, Dir: rr.CacheDir}); berr != nil {
+	built, berr := runBoxBuildWithEngine(ctx, ex, spec.BuildRequest{Boxes: []string{rr.BoxName}, Dir: rr.CacheDir}, runEngine)
+	if berr != nil {
 		return fmt.Errorf("ensure-image %q: pull failed and remote build failed: %w", image, berr)
 	}
 	return aliasBuiltImageOntoRequestedRef(ctx, image, runEngine, func() string {
-		return resolveRemoteImageRef(ctx, ex, rr.CacheDir, rr.BoxName)
+		return builtRefForBox(built, rr.BoxName)
 	})
 }
 
@@ -138,15 +140,15 @@ func ensureRemoteRef(ctx context.Context, ex *sdk.Executor, image, stripped, run
 // build `image` ITSELF must resolve in local storage. A box build produces the project's
 // CalVer-tagged ref, so a full input ref (pinned to a different tag, or tagless) needs an alias.
 //
-// resolveProduced is a CALLBACK, deliberately, because it must run AFTER the build: every producer
-// of it bottoms out in ResolveShellImageRef with an empty tag, which READS THE LOCAL IMAGE STORE
-// (spec/container/local_image_coneb.go — empty tag → ResolveNewestLocalCalVer). Resolved BEFORE
-// the build, on a store that does not yet hold the image, it degrades to the bare
-// `<registry>/<name>` — which both EQUALS `image` (silently defeating a `produced != image` guard)
-// and names a ref the build never created. That was a real cold-store defect: the first run on a
-// fresh store left the requested ref absent and failed ~1000 log lines later with podman's
-// `image not known`, while every subsequent run passed because run 1's build had seeded the store
-// — so the bug reproduced only on the fresh-machine path R10 exists to cover.
+// resolveProduced is a CALLBACK, deliberately, because it must run AFTER the build. It must
+// return the ref the build drive actually produced (builtRefForBox over the drive's returned
+// FullTags). Re-resolving it from a local image store instead reads the DEFAULT engine's store,
+// which is the wrong store once the caller overrode the run engine (and a prefixed bed tag such
+// as `check-engine-containerd-pod-2026.309.1951` still carries a CalVer suffix, so the wrong
+// store can return the REQUESTED tag itself and defeat the `produced != image` guard). Resolving
+// before the build is equally wrong: it degrades to the bare `<registry>/<name>`, which both
+// equals `image` and names a ref the build never created (the cold-store `image not known`
+// defect R10 exists to cover).
 //
 // A failed alias is a HARD error, not a warning: the caller cannot proceed without the ref, and a
 // warning here only relocates the failure to a downstream message that names neither this build
@@ -167,6 +169,28 @@ func aliasBuiltImageOntoRequestedRef(ctx context.Context, image, runEngine strin
 	}
 	fmt.Fprintf(os.Stderr, "ensure-image: tagged %s as %s\n", produced, image)
 	return nil
+}
+
+// builtRefForBox picks the ref the build produced for box from the build drive's returned
+// FullTags. The drive's OWN return value is the authoritative produced ref. Re-resolving it
+// from a local image store (the former callback) reads the DEFAULT engine's store — which is
+// exactly the wrong store once build:ensure has overridden the run engine — and can return the
+// requested tag itself (defeating the `produced != image` guard) because a prefixed bed tag
+// still carries a CalVer suffix.
+func builtRefForBox(built []string, box string) string {
+	for _, ref := range built {
+		repo := ref
+		if colon := strings.LastIndex(repo, ":"); colon > strings.LastIndex(repo, "/") {
+			repo = repo[:colon]
+		}
+		if repo == box || strings.HasSuffix(repo, "/"+box) {
+			return ref
+		}
+	}
+	if len(built) == 1 {
+		return built[0]
+	}
+	return ""
 }
 
 // resolveRemoteImageRef computes the registry pull ref for a remote box PLUGIN-SIDE, loading the
@@ -232,17 +256,18 @@ func ensureProjectRef(ctx context.Context, ex *sdk.Executor, image, dir, runEngi
 	}
 
 	fmt.Fprintf(os.Stderr, "ensure-image: building %s locally\n", fallbackShort)
-	if _, berr := runBoxBuild(ctx, ex, spec.BuildRequest{
+	built, berr := runBoxBuildWithEngine(ctx, ex, spec.BuildRequest{
 		Boxes:           []string{fallbackShort},
 		Dir:             dir,
 		IncludeDisabled: true,
 		Jobs:            4,
-	}); berr != nil {
+	}, runEngine)
+	if berr != nil {
 		return fmt.Errorf("ensure-image %q: pull failed and local build failed: %w", image, berr)
 	}
 
 	return aliasBuiltImageOntoRequestedRef(ctx, image, runEngine, func() string {
-		return resolveImageRefPlugin(fallbackShort, cfg)
+		return builtRefForBox(built, fallbackShort)
 	})
 }
 
@@ -359,9 +384,22 @@ func remoteImageResolve(ctx context.Context, ex *sdk.Executor, ref, tag string) 
 // back to a local build.
 func enginePull(ctx context.Context, runEngine, ref string) error {
 	cmd := exec.CommandContext(ctx, container.EngineBinary(runEngine), "pull", ref)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	// CAPTURE the engine's output. A pull miss is an EXPECTED fallback here — the caller
+	// rebuilds the image locally — so the engine's own `level=fatal` line must not escape into
+	// a bed's log as an unhandled error (the R10 zero-warning gate counts it, even though the
+	// config path exits 0 after the fallback). The caller reports the concise failure, and the
+	// captured reason rides the returned ERROR so a genuine pull failure (network/auth) keeps
+	// its diagnostic instead of collapsing to "exit status 1".
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		if detail := strings.TrimSpace(out.String()); detail != "" {
+			return fmt.Errorf("%w: %s", err, detail)
+		}
+		return err
+	}
+	return nil
 }
 
 // engineTag adds a second tag to an existing local image. Used to satisfy a tag-pinned input ref

@@ -78,12 +78,30 @@ func resolveBuild(ctx context.Context, ex *sdk.Executor, req spec.BuildRequest, 
 // refs (the BuildReply.Written provenance). The engine RESOLVE runs plugin-side (resolveBuildEngine,
 // K3 U6); the layer MERGE crosses to verb:oci; the podman exec + the build-order orchestration live HERE.
 func runBoxBuild(ctx context.Context, ex *sdk.Executor, req spec.BuildRequest) ([]string, error) {
+	return runBoxBuildWithEngine(ctx, ex, req, "")
+}
+
+// buildEngineFor picks the engine the BUILD bridges its OCI export into. `build:resolve`
+// reports the host-wide runtime engine; a `build:ensure` caller that asked for a DIFFERENT
+// run engine must win, or a locally-built image lands in the host engine's store and the
+// deploy that asked for containerd never finds it (the alias step fails
+// `image "...": not found`, and a pod bed cannot run on containerd).
+func buildEngineFor(resolved, requested string) string {
+	if requested != "" {
+		return requested
+	}
+	return resolved
+}
+
+// runBoxBuildWithEngine is runBoxBuild with an explicit run-engine override. `requested`
+// empty preserves the pre-existing host-runtime resolution.
+func runBoxBuildWithEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildRequest, requested string) ([]string, error) {
 	reply, err := resolveBuild(ctx, ex, req, false)
 	if err != nil {
 		return nil, err
 	}
 	cfg := driveConfig{
-		RunEngine:        reply.EngineName,
+		RunEngine:        buildEngineFor(reply.EngineName, requested),
 		Platform:         reply.Platform,
 		Cache:            reply.Cache,
 		Push:             req.Push,
