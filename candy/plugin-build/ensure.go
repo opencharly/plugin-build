@@ -34,6 +34,7 @@ package build
 // and the podman pull/tag exec are pure sdk/kit + os/exec.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -383,8 +384,13 @@ func remoteImageResolve(ctx context.Context, ex *sdk.Executor, ref, tag string) 
 // back to a local build.
 func enginePull(ctx context.Context, runEngine, ref string) error {
 	cmd := exec.CommandContext(ctx, container.EngineBinary(runEngine), "pull", ref)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
+	// CAPTURE the engine's output. A pull miss is an EXPECTED fallback here — the caller
+	// rebuilds the image locally — so the engine's own `level=fatal` line must not escape into
+	// a bed's log as an unhandled error (the R10 zero-warning gate counts it, even though the
+	// config path exits 0 after the fallback). The caller reports the concise failure.
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
 	return cmd.Run()
 }
 
