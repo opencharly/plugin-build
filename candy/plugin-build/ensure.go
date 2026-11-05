@@ -387,11 +387,19 @@ func enginePull(ctx context.Context, runEngine, ref string) error {
 	// CAPTURE the engine's output. A pull miss is an EXPECTED fallback here — the caller
 	// rebuilds the image locally — so the engine's own `level=fatal` line must not escape into
 	// a bed's log as an unhandled error (the R10 zero-warning gate counts it, even though the
-	// config path exits 0 after the fallback). The caller reports the concise failure.
+	// config path exits 0 after the fallback). The caller reports the concise failure, and the
+	// captured reason rides the returned ERROR so a genuine pull failure (network/auth) keeps
+	// its diagnostic instead of collapsing to "exit status 1".
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		if detail := strings.TrimSpace(out.String()); detail != "" {
+			return fmt.Errorf("%w: %s", err, detail)
+		}
+		return err
+	}
+	return nil
 }
 
 // engineTag adds a second tag to an existing local image. Used to satisfy a tag-pinned input ref
