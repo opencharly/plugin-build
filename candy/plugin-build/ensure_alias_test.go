@@ -90,3 +90,28 @@ func TestAliasBuiltImage_FullRefPredicateSeparatesTheCases(t *testing.T) {
 		t.Error("a bare short name must NOT read as a full ref")
 	}
 }
+
+// TestBuildEngineFor pins the run-engine override the local build fallback needs: the
+// build:resolve reply names the HOST runtime engine, but a build:ensure caller that asked
+// for a different run engine must have the build bridge its OCI export into THAT engine's
+// store. Without the override a locally-built image lands in podman and the deploy that
+// asked for containerd never finds it (the alias fails `image "...": not found`).
+func TestBuildEngineFor(t *testing.T) {
+	cases := []struct {
+		name      string
+		resolved  string
+		requested string
+		want      string
+	}{
+		{"requested run engine wins", "podman", "containerd", "containerd"},
+		{"empty requested keeps the resolved engine", "podman", "", "podman"},
+		{"both empty stays empty", "", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := buildEngineFor(tc.resolved, tc.requested); got != tc.want {
+				t.Fatalf("buildEngineFor(%q, %q) = %q, want %q", tc.resolved, tc.requested, got, tc.want)
+			}
+		})
+	}
+}

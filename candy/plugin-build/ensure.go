@@ -125,7 +125,7 @@ func ensureRemoteRef(ctx context.Context, ex *sdk.Executor, image, stripped, run
 		}
 	}
 	fmt.Fprintf(os.Stderr, "ensure-image: building remote %s from cached source\n", image)
-	if _, berr := runBoxBuild(ctx, ex, spec.BuildRequest{Boxes: []string{rr.BoxName}, Dir: rr.CacheDir}); berr != nil {
+	if _, berr := runBoxBuildWithEngine(ctx, ex, spec.BuildRequest{Boxes: []string{rr.BoxName}, Dir: rr.CacheDir}, runEngine); berr != nil {
 		return fmt.Errorf("ensure-image %q: pull failed and remote build failed: %w", image, berr)
 	}
 	return aliasBuiltImageOntoRequestedRef(ctx, image, runEngine, func() string {
@@ -232,12 +232,12 @@ func ensureProjectRef(ctx context.Context, ex *sdk.Executor, image, dir, runEngi
 	}
 
 	fmt.Fprintf(os.Stderr, "ensure-image: building %s locally\n", fallbackShort)
-	if _, berr := runBoxBuild(ctx, ex, spec.BuildRequest{
+	if _, berr := runBoxBuildWithEngine(ctx, ex, spec.BuildRequest{
 		Boxes:           []string{fallbackShort},
 		Dir:             dir,
 		IncludeDisabled: true,
 		Jobs:            4,
-	}); berr != nil {
+	}, runEngine); berr != nil {
 		return fmt.Errorf("ensure-image %q: pull failed and local build failed: %w", image, berr)
 	}
 
