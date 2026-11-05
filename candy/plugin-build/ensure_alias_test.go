@@ -115,3 +115,47 @@ func TestBuildEngineFor(t *testing.T) {
 		})
 	}
 }
+
+// TestBuiltRefForBox pins the produced-ref source: the build drive's returned FullTags are
+// authoritative. Re-resolving from a local store reads the default engine's store (wrong once
+// the run engine is overridden) and can return the requested prefixed bed tag itself.
+func TestBuiltRefForBox(t *testing.T) {
+	cases := []struct {
+		name  string
+		built []string
+		box   string
+		want  string
+	}{
+		{
+			name:  "single built ref for the requested box",
+			built: []string{"ghcr.io/opencharly/probe-engine-image:2026.309.1953"},
+			box:   "probe-engine-image",
+			want:  "ghcr.io/opencharly/probe-engine-image:2026.309.1953",
+		},
+		{
+			name:  "picks the matching box out of several",
+			built: []string{"ghcr.io/opencharly/other:2026.309.1953", "ghcr.io/opencharly/probe-engine-image:2026.309.1953"},
+			box:   "probe-engine-image",
+			want:  "ghcr.io/opencharly/probe-engine-image:2026.309.1953",
+		},
+		{
+			name:  "single ref with a registry-namespaced leaf still matches",
+			built: []string{"ghcr.io/opencharly/probe-engine-image:2026.309.1953"},
+			box:   "opencharly/probe-engine-image",
+			want:  "ghcr.io/opencharly/probe-engine-image:2026.309.1953",
+		},
+		{
+			name:  "nothing built",
+			built: nil,
+			box:   "probe-engine-image",
+			want:  "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := builtRefForBox(tc.built, tc.box); got != tc.want {
+				t.Fatalf("builtRefForBox(%v, %q) = %q, want %q", tc.built, tc.box, got, tc.want)
+			}
+		})
+	}
+}
