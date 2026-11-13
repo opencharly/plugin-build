@@ -451,6 +451,74 @@ func refTag(ref string) string {
 	return ref[colon+1:]
 }
 
+// containerfileStageRefs is the ordered, deduplicated set of registry references a
+// Containerfile can resolve locally: the ARG BASE_IMAGE (the final stage's base) first, then
+// every explicit FROM reference.
+func containerfileStageRefs(containerfile string) []string {
+	var refs []string
+	if base := containerfileBaseRef(containerfile); base != "" {
+		refs = append(refs, base)
+	}
+	for _, ref := range containerfileFromRefs(containerfile) {
+		dup := false
+		for _, seen := range refs {
+			if seen == ref {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			refs = append(refs, ref)
+		}
+	}
+	return refs
+}
+
+// containerfileFromRefs returns every REGISTRY reference a Containerfile names in a FROM
+// line, in file order and deduplicated. ARG-driven forms (`FROM ${BASE_IMAGE}`, handled by
+// containerfileBaseRef) and `scratch` are skipped: they are not registry lookups.
+//
+// WHY EVERY STAGE, not just the base: a multi-stage Containerfile names its BUILDER stages by
+// registry reference too (`FROM ghcr.io/opencharly/arch-builder:<tag> AS build`), and when that
+// builder was itself built locally in this run it lives only in the charly image store. Binding
+// only the final stage's base left such a stage to be resolved from the registry, where the
+// check-run tag does not exist — measured: `charly check run check-openwebui-pod` failed at
+// `[internal] load metadata for ghcr.io/opencharly/arch-builder:<tag>: not found`, on the
+// unmodified main tree as well.
+func containerfileFromRefs(containerfile string) []string {
+	seen := map[string]bool{}
+	var refs []string
+	for _, line := range strings.Split(containerfile, "\n") {
+		// Fields, not a "FROM " prefix match: a Dockerfile allows any whitespace after the
+		// instruction (a TAB is legal), and the instruction may carry flags before the
+		// reference (`FROM --platform=linux/amd64 <ref> AS stage`).
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 || !strings.EqualFold(fields[0], "FROM") {
+			continue
+		}
+		ref := ""
+		for _, f := range fields[1:] {
+			if strings.HasPrefix(f, "--") { // FROM flags, not the image reference
+				continue
+			}
+			ref = f
+			break
+		}
+		// A bare stage alias (`FROM builder AS final`) is not a registry reference; it is
+		// kept here and harmlessly dropped by storeLookup, which answers only for images it
+		// holds.
+		if ref == "" || strings.Contains(ref, "$") || strings.EqualFold(ref, "scratch") {
+			continue
+		}
+		if seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		refs = append(refs, ref)
+	}
+	return refs
+}
+
 // containerfileBaseRef extracts the direct base reference from a generated Containerfile. The
 // renderer emits `ARG BASE_IMAGE=<ref>` as the first instruction of a non-scratch box (see
 // sdk/deploykit/generate.go), and the drive overrides that ARG when the base is in the store.
