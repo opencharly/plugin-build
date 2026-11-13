@@ -492,15 +492,24 @@ func containerfileFromRefs(containerfile string) []string {
 	seen := map[string]bool{}
 	var refs []string
 	for _, line := range strings.Split(containerfile, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if len(trimmed) < 5 || !strings.EqualFold(trimmed[:5], "FROM ") {
+		// Fields, not a "FROM " prefix match: a Dockerfile allows any whitespace after the
+		// instruction (a TAB is legal), and the instruction may carry flags before the
+		// reference (`FROM --platform=linux/amd64 <ref> AS stage`).
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 || !strings.EqualFold(fields[0], "FROM") {
 			continue
 		}
-		fields := strings.Fields(trimmed)
-		if len(fields) < 2 {
-			continue
+		ref := ""
+		for _, f := range fields[1:] {
+			if strings.HasPrefix(f, "--") { // FROM flags, not the image reference
+				continue
+			}
+			ref = f
+			break
 		}
-		ref := fields[1]
+		// A bare stage alias (`FROM builder AS final`) is not a registry reference; it is
+		// kept here and harmlessly dropped by storeLookup, which answers only for images it
+		// holds.
 		if ref == "" || strings.Contains(ref, "$") || strings.EqualFold(ref, "scratch") {
 			continue
 		}

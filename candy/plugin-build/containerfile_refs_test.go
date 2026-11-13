@@ -54,6 +54,17 @@ func TestContainerfileStageRefsDedupeAcrossForms(t *testing.T) {
 
 // A Containerfile with no explicit FROM ref and no ARG must yield nothing, so no empty
 // context opt is ever emitted.
+// Dockerfile-legal forms the naive "FROM " prefix match missed: a TAB separator and a
+// --platform flag before the reference.
+func TestContainerfileFromRefsHandlesFlagsAndTabs(t *testing.T) {
+	src := "FROM\tghcr.io/x/tab:t AS a\nFROM --platform=linux/amd64 ghcr.io/x/flag:t AS b\n"
+	got := containerfileFromRefs(src)
+	want := []string{"ghcr.io/x/tab:t", "ghcr.io/x/flag:t"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("from refs = %v, want %v", got, want)
+	}
+}
+
 func TestContainerfileStageRefsEmpty(t *testing.T) {
 	if got := containerfileStageRefs("FROM scratch\n"); len(got) != 0 {
 		t.Fatalf("want no refs, got %v", got)
