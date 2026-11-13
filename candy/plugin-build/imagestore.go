@@ -451,20 +451,6 @@ func refTag(ref string) string {
 	return ref[colon+1:]
 }
 
-// containerfileBaseRef extracts the direct base reference from a generated Containerfile. The
-// renderer emits `ARG BASE_IMAGE=<ref>` as the first instruction of a non-scratch box (see
-// sdk/deploykit/generate.go), and the drive overrides that ARG when the base is in the store.
-// containerfileFromRefs returns every REGISTRY reference a Containerfile names in a FROM
-// line, in file order and deduplicated. ARG-driven forms (`FROM ${BASE_IMAGE}`, handled by
-// containerfileBaseRef) and `scratch` are skipped: they are not registry lookups.
-//
-// WHY EVERY STAGE, not just the base: a multi-stage Containerfile names its BUILDER stages by
-// registry reference too (`FROM ghcr.io/opencharly/arch-builder:<tag> AS build`), and when that
-// builder was itself built locally in this run it lives only in the charly image store. Binding
-// only the final stage's base left such a stage to be resolved from the registry, where the
-// check-run tag does not exist — measured: `charly check run check-openwebui-pod` failed at
-// `[internal] load metadata for ghcr.io/opencharly/arch-builder:<tag>: not found`, on the
-// unmodified main tree as well.
 // containerfileStageRefs is the ordered, deduplicated set of registry references a
 // Containerfile can resolve locally: the ARG BASE_IMAGE (the final stage's base) first, then
 // every explicit FROM reference.
@@ -488,6 +474,17 @@ func containerfileStageRefs(containerfile string) []string {
 	return refs
 }
 
+// containerfileFromRefs returns every REGISTRY reference a Containerfile names in a FROM
+// line, in file order and deduplicated. ARG-driven forms (`FROM ${BASE_IMAGE}`, handled by
+// containerfileBaseRef) and `scratch` are skipped: they are not registry lookups.
+//
+// WHY EVERY STAGE, not just the base: a multi-stage Containerfile names its BUILDER stages by
+// registry reference too (`FROM ghcr.io/opencharly/arch-builder:<tag> AS build`), and when that
+// builder was itself built locally in this run it lives only in the charly image store. Binding
+// only the final stage's base left such a stage to be resolved from the registry, where the
+// check-run tag does not exist — measured: `charly check run check-openwebui-pod` failed at
+// `[internal] load metadata for ghcr.io/opencharly/arch-builder:<tag>: not found`, on the
+// unmodified main tree as well.
 func containerfileFromRefs(containerfile string) []string {
 	seen := map[string]bool{}
 	var refs []string
@@ -522,6 +519,9 @@ func containerfileFromRefs(containerfile string) []string {
 	return refs
 }
 
+// containerfileBaseRef extracts the direct base reference from a generated Containerfile. The
+// renderer emits `ARG BASE_IMAGE=<ref>` as the first instruction of a non-scratch box (see
+// sdk/deploykit/generate.go), and the drive overrides that ARG when the base is in the store.
 func containerfileBaseRef(containerfile string) string {
 	for _, line := range strings.Split(containerfile, "\n") {
 		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "ARG BASE_IMAGE=")
