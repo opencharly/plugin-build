@@ -52,8 +52,6 @@ func TestContainerfileStageRefsDedupeAcrossForms(t *testing.T) {
 	}
 }
 
-// A Containerfile with no explicit FROM ref and no ARG must yield nothing, so no empty
-// context opt is ever emitted.
 // Dockerfile-legal forms the naive "FROM " prefix match missed: a TAB separator and a
 // --platform flag before the reference.
 func TestContainerfileFromRefsHandlesFlagsAndTabs(t *testing.T) {
@@ -65,6 +63,8 @@ func TestContainerfileFromRefsHandlesFlagsAndTabs(t *testing.T) {
 	}
 }
 
+// A Containerfile with no explicit FROM ref and no ARG must yield nothing, so no empty
+// context opt is ever emitted.
 func TestContainerfileStageRefsEmpty(t *testing.T) {
 	if got := containerfileStageRefs("FROM scratch\n"); len(got) != 0 {
 		t.Fatalf("want no refs, got %v", got)
