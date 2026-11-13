@@ -163,21 +163,33 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	// from buildkit's `--oci-layout` store (measured — `FROM oci-layout://` itself is not a valid
 	// dockerfile reference). The registry stays the fallback: when the base is absent from the
 	// store, nothing is bound and the daemon resolves the reference normally.
-	baseRef := containerfileBaseRef(containerfile)
-	baseDigest := ""
-	if baseRef != "" {
+	// EVERY stage a Containerfile names is bound this way, not only the final one: a
+	// multi-stage recipe references its builder stages by registry name too, and when the
+	// builder was built locally in this run it exists only in the charly image store.
+	// Binding only the base left such a stage to the registry, where a check-run tag does
+	// not exist (measured: `check run check-openwebui-pod` died at
+	// `[internal] load metadata for ghcr.io/opencharly/arch-builder:<tag>: not found`, on
+	// the unmodified main tree as well).
+	localRefs := containerfileStageRefs(containerfile)
+	var bindings []string
+	if len(localRefs) > 0 {
 		storeDir, serr := imageStoreDir()
 		if serr != nil {
 			return serr
 		}
-		digest, found, serr := storeLookup(baseRef)
-		if serr != nil {
-			return serr
-		}
-		if found {
-			baseDigest = digest
-			build.OCILayouts = []buildkitdrive.OCILayout{{ID: imageStoreID, Dir: storeDir}}
-			fmt.Fprintf(os.Stderr, "--- %s: base %s from the charly image store ---\n", box.Name, baseRef)
+		for _, ref := range localRefs {
+			digest, found, serr := storeLookup(ref)
+			if serr != nil {
+				return serr
+			}
+			if !found {
+				continue
+			}
+			if len(bindings) == 0 {
+				build.OCILayouts = []buildkitdrive.OCILayout{{ID: imageStoreID, Dir: storeDir}}
+			}
+			bindings = append(bindings, ref+"=oci-layout://"+imageStoreID+"@"+digest)
+			fmt.Fprintf(os.Stderr, "--- %s: %s from the charly image store ---\n", box.Name, ref)
 		}
 	}
 
@@ -185,8 +197,8 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	if err != nil {
 		return err
 	}
-	if baseDigest != "" {
-		args = append(args, "--opt", "context:"+baseRef+"=oci-layout://"+imageStoreID+"@"+baseDigest)
+	for _, b := range bindings {
+		args = append(args, "--opt", "context:"+b)
 	}
 	// Only the images THIS build genuinely produced for THIS project are published; see
 	// pushTargets + pushOutputFor. An imported `import:` namespace's base is built here but its
