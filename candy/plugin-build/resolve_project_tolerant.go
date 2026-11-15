@@ -51,8 +51,11 @@ func resolveProjectEnvelopeTolerant(ctx context.Context, ex *sdk.Executor, req s
 	// installed on the consumer side would never fire. Install one that keeps the identical stderr
 	// line AND records a warning diagnostic, so the caller's summary counts what the operator reads
 	// (opencharly/sdk#519 — measured: the warning printed and `box validate` said "0 warnings").
-	prevReporter := deploykit.SetUnsatisfiedInitDependsReporter(initDependsCollector(&diags))
-	defer deploykit.SetUnsatisfiedInitDependsReporter(prevReporter)
+	// The installation is a NAMED function so the production wiring itself is testable: a test calls
+	// installInitDependsReporter and drives the real injector under it, so deleting or changing this
+	// line breaks a test instead of leaving every test green (opencharly/plugin-build#55, review
+	// round 2: "every test stays green if it is deleted" was true of the first cut).
+	defer installInitDependsReporter(&diags)()
 
 	dir := req.Dir
 	if dir == "" {
@@ -124,4 +127,14 @@ func initDependsCollector(diags *spec.Diagnostics) func(boxName, initName, depen
 		fmt.Fprintf(os.Stderr, "warning: %s\n", msg)
 		diags.Items = append(diags.Items, spec.Diagnostic{Severity: spec.SeverityWarning, Message: msg})
 	}
+}
+
+// installInitDependsReporter installs the collecting reporter and returns the function that restores
+// the previous one. It exists as a NAMED seam so the production installation is covered by a test:
+// the test calls THIS function and drives deploykit.InjectInitDependsCandy under it, which means
+// removing the installation from resolveProjectEnvelopeTolerant breaks a test rather than silently
+// leaving the count at zero.
+func installInitDependsReporter(diags *spec.Diagnostics) func() {
+	prev := deploykit.SetUnsatisfiedInitDependsReporter(initDependsCollector(diags))
+	return func() { deploykit.SetUnsatisfiedInitDependsReporter(prev) }
 }

@@ -39,8 +39,10 @@ func TestInitDependsCollector_ObservesTheRealInjector(t *testing.T) {
 	}}
 
 	var diags spec.Diagnostics
-	prev := deploykit.SetUnsatisfiedInitDependsReporter(initDependsCollector(&diags))
-	defer deploykit.SetUnsatisfiedInitDependsReporter(prev)
+	// THE PRODUCTION INSTALLER, not a hand-rolled one: installInitDependsReporter is the exact
+	// function resolveProjectEnvelopeTolerant calls, so deleting that call's wiring breaks this test.
+	restore := installInitDependsReporter(&diags)
+	defer restore()
 
 	deploykit.InjectInitDependsCandy(cfg, layers, initCfg)
 
