@@ -39,8 +39,15 @@ func TestInitDependsCollector_ObservesTheRealInjector(t *testing.T) {
 	}}
 
 	var diags spec.Diagnostics
-	// THE PRODUCTION INSTALLER, not a hand-rolled one: installInitDependsReporter is the exact
-	// function resolveProjectEnvelopeTolerant calls, so deleting that call's wiring breaks this test.
+	// The PRODUCTION installer function, not a hand-rolled one.
+	//
+	// WHAT THIS DOES NOT COVER, stated plainly because a previous comment here claimed otherwise and
+	// was false: deleting the call SITE (`defer installInitDependsReporter(&diags)()` inside
+	// resolveProjectEnvelopeTolerant) leaves this test green. Covering the call site needs a live
+	// plugin host -- `resolveProjectEnvelopeTolerant(ctx, &sdk.Executor{}, ...)` panics on the nil
+	// executor inside loaderkit.LoadUnifiedViaExecutor, measured and recorded on
+	// opencharly/plugin-build#55. The end-to-end proof therefore belongs to this repo's own bed over
+	// a fixture project, filed as opencharly/plugin-build#56.
 	restore := installInitDependsReporter(&diags)
 	defer restore()
 
