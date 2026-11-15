@@ -1,6 +1,8 @@
 package build
 
 import (
+	"io"
+	"os"
 	"testing"
 
 	"github.com/opencharly/sdk/deploykit"
@@ -15,8 +17,31 @@ import (
 // a printing collector showed the operator the identical warning twice (measured on the fixture:
 // two prints, one count). This test fails if the print returns.
 func TestInitDependsCollector_RecordsWithoutPrinting(t *testing.T) {
+	// CAPTURE stderr for real: the claim under test is the ABSENCE of output, so a test that only
+	// inspects the diagnostics cannot see a print at all (review round 1 — the first version of this
+	// test asserted nothing about output while claiming it did).
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
 	var diags spec.Diagnostics
 	initDependsCollector(&diags)("demo-box", "supervisord", "supervisord")
+
+	if cerr := w.Close(); cerr != nil {
+		t.Fatalf("close pipe: %v", cerr)
+	}
+	printed, rerr := io.ReadAll(r)
+	if rerr != nil {
+		t.Fatalf("read pipe: %v", rerr)
+	}
+	if len(printed) != 0 {
+		t.Errorf("the collector must record WITHOUT printing (the host's resolve already printed this "+
+			"line for the same command); it wrote %q", string(printed))
+	}
 
 	if len(diags.Items) != 1 {
 		t.Fatalf("want exactly 1 diagnostic, got %d", len(diags.Items))

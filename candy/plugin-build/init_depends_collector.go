@@ -18,11 +18,12 @@ import (
 
 // initDependsCollector makes the warning COUNTABLE without printing it a second time.
 //
-// The host's own project resolve already prints this line for the same command, in the host
-// process, and the validate resolve runs in the plugin process — so a collector that also printed
-// would show the operator the identical warning twice (measured on the fixture: two prints, one
-// count). The collector therefore RECORDS the SDK's ONE message text and leaves the printing to the
-// resolve that already does it.
+// MEASURED TOPOLOGY (opencharly/sdk#519): candy/plugin-build is COMPILED INTO the charly binary,
+// and the binary invokes its own plugin host as a SECOND PROCESS. The host's project resolve (process
+// A) prints the line; this validate resolve (process B) reaches the same injector. So a collector
+// that also printed showed the operator the identical warning twice — measured on the fixture as two
+// prints, one count, and confirmed by the printing collector's own pid marker. The collector
+// therefore RECORDS the SDK's ONE message text and leaves the printing to the resolve that does it.
 func initDependsCollector(diags *spec.Diagnostics) func(boxName, initName, dependsCandy string) {
 	return func(boxName, initName, dependsCandy string) {
 		diags.Items = append(diags.Items, spec.Diagnostic{
