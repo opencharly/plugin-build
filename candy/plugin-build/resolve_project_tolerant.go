@@ -51,6 +51,14 @@ func resolveProjectEnvelopeTolerant(ctx context.Context, ex *sdk.Executor, req s
 		}
 	}
 
+	// The init-`depends_candy` warning is emitted INSIDE this body: projectResolvedProjectLeg
+	// (below) calls loaderkit.ProjectResolvedProject, which runs deploykit.InjectInitDependsCandy —
+	// and that runs in THIS process, because candy/plugin-build is COMPILED INTO the charly binary
+	// (measured: `INJECT-EMITTER pid=<the host pid>`; opencharly/sdk#519). The collector keeps the
+	// printed line and counts it, so `box validate` stops printing a warning and reporting zero.
+	restoreInitDepends := installInitDependsReporter(&diags)
+	defer restoreInitDepends()
+
 	uf, ok, err := loaderkit.LoadUnifiedViaExecutor(ctx, ex, dir)
 	if err != nil {
 		// A real load failure (schema gate, parse error, …) — tolerant: diagnose, empty envelope.

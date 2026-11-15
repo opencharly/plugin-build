@@ -204,7 +204,17 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 	}
 
 	// --- 10. project the resolved-project ENVELOPE (pure loaderkit assembler + plugin seams) ---
+	//
+	// The init-`depends_candy` warning is emitted INSIDE this projection (the seam's
+	// FillNamespacedBoxes -> fillNamespacedBoxes -> deploykit.FillNamespaceBoxViews), so the
+	// reporter is installed around it and its findings ride the reply. Until
+	// opencharly/spec#330 the reply had no diagnostics field at all, which is why
+	// `charly box validate` printed the line and then reported "0 warnings"
+	// (opencharly/sdk#519).
+	var diags spec.Diagnostics
+	restoreReporter := installInitDependsReporter(&diags)
 	rp, err := projectResolvedProjectLeg(ctx, ex, cfg, layers, uf, distroCfg, builderCfg, initCfg, dir, uf.Version, tag, req.IncludeDisabled, resolved, nil)
+	restoreReporter()
 	if err != nil {
 		return spec.BuildResolveReply{Error: errString(fmt.Errorf("projecting resolved-project envelope: %w", err))}, nil
 	}
@@ -212,7 +222,7 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 
 	// generate-only: return the envelope + order so render.go can render (no podman).
 	if generateOnly {
-		return spec.BuildResolveReply{ResolvedProject: rp, Order: order}, nil
+		return spec.BuildResolveReply{ResolvedProject: rp, Order: order, Diagnostics: diags}, nil
 	}
 
 	// --- 11. DRIVE-MODEL (pure): engine/platform/levels/descriptors/tunables ---
@@ -256,6 +266,7 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 		Cache:            resolveDriveCache(req.Cache, def),
 		KeepImages:       int64(resolveIntPtrDrive(def.KeepImages)),
 		ResolvedProject:  rp,
+		Diagnostics:      diags,
 	}, nil
 }
 
