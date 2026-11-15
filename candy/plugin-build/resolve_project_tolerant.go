@@ -2,10 +2,12 @@ package build
 
 import (
 	"context"
+	"fmt"
 	"os"
 
 	"github.com/opencharly/sdk"
 	"github.com/opencharly/sdk/buildkit"
+	"github.com/opencharly/sdk/deploykit"
 	"github.com/opencharly/sdk/loaderkit"
 	"github.com/opencharly/spec/spec"
 )
@@ -43,6 +45,14 @@ func resolveProjectEnvelopeTolerant(ctx context.Context, ex *sdk.Executor, req s
 	addDiag := func(err error) {
 		diags.Items = append(diags.Items, spec.Diagnostic{Severity: spec.SeverityError, Message: err.Error()})
 	}
+
+	// The init-dependency warning is PRINTED by this process (deploykit.InjectInitDependsCandy is
+	// called from resolve.go HERE, not in plugin-box), so the count has to be taken HERE: a reporter
+	// installed on the consumer side would never fire. Install one that keeps the identical stderr
+	// line AND records a warning diagnostic, so the caller's summary counts what the operator reads
+	// (opencharly/sdk#519 — measured: the warning printed and `box validate` said "0 warnings").
+	prevReporter := deploykit.SetUnsatisfiedInitDependsReporter(initDependsCollector(&diags))
+	defer deploykit.SetUnsatisfiedInitDependsReporter(prevReporter)
 
 	dir := req.Dir
 	if dir == "" {
@@ -99,4 +109,19 @@ func resolveProjectEnvelopeTolerant(ctx context.Context, ex *sdk.Executor, req s
 	}
 	rp.Primaries = loaderkit.LoaderThreadedViaExecutor(ctx, ex).Primaries
 	return *rp, diags
+}
+
+// initDependsCollector is the reporter that keeps the init-dependency warning VISIBLE and makes it
+// COUNTABLE at once: it prints the SDK's ONE message to stderr (unchanged operator output) and
+// appends the same text as a warning-severity diagnostic, which the caller's summary counts.
+//
+// A consumer-side reporter cannot do this job: during `charly box validate` the resolution — and
+// therefore deploykit.InjectInitDependsCandy — runs in THIS process (resolve.go), so plugin-box
+// would install a reporter that never fires (opencharly/sdk#519, process topology measured).
+func initDependsCollector(diags *spec.Diagnostics) func(boxName, initName, dependsCandy string) {
+	return func(boxName, initName, dependsCandy string) {
+		msg := deploykit.UnsatisfiedInitDependsMessage(boxName, initName, dependsCandy)
+		fmt.Fprintf(os.Stderr, "warning: %s\n", msg)
+		diags.Items = append(diags.Items, spec.Diagnostic{Severity: spec.SeverityWarning, Message: msg})
+	}
 }
