@@ -51,6 +51,20 @@ func resolveProjectEnvelopeTolerant(ctx context.Context, ex *sdk.Executor, req s
 		}
 	}
 
+	// The init-`depends_candy` warning is emitted INSIDE this body: projectResolvedProjectLeg
+	// (below) calls loaderkit.ProjectResolvedProject, which runs deploykit.InjectInitDependsCandy —
+	// and that runs in THIS process, because candy/plugin-build is COMPILED INTO the charly binary
+	// (measured: `INJECT-EMITTER pid=<the host pid>`; opencharly/sdk#519). The collector keeps the
+	// printed line and counts it, so `box validate` stops printing a warning and reporting zero.
+	// CONCURRENCY: the reporter seam is a process-global, and this plugin is compiled into the host
+	// binary, so two concurrent validate ops in one process would race on it. The seam has no
+	// per-invocation form today; a validate op is one resolve per invocation, and the window is the
+	// body of this function. Guarding it needs an sdk change (a per-invocation reporter), recorded on
+	// opencharly/sdk#519 rather than improvised with a mutex around a global that other callers also
+	// mutate.
+	restoreInitDepends := installInitDependsReporter(&diags)
+	defer restoreInitDepends()
+
 	uf, ok, err := loaderkit.LoadUnifiedViaExecutor(ctx, ex, dir)
 	if err != nil {
 		// A real load failure (schema gate, parse error, …) — tolerant: diagnose, empty envelope.
