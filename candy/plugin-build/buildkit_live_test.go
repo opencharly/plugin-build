@@ -30,8 +30,8 @@ import (
 func TestBuildImage_LiveBuildsAndBridgesIntoTheRunEngine(t *testing.T) {
 	liveTools(t, "rootlesskit", "buildkitd", "buildctl", "podman")
 
-	// A live run writes the CHARLY IMAGE STORE, so point it (and the index lock's state root) at
-	// temp dirs: a check must never mutate the operator's store.
+	// A live run writes the charly image store, so point it at a temp cache root: a check must
+	// never mutate the operator's store, and `CHARLY_CACHE_DIR` is D-STORE-1's ONE lever.
 	liveStoreDir(t)
 
 	const (
