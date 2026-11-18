@@ -54,6 +54,10 @@ func resolveBoxViewsWithTagScope(cfg *spec.Config, layers map[string]spec.CandyR
 	for name := range resolved {
 		produced = append(produced, name)
 	}
+	named := make(map[string]bool, len(requested))
+	for _, name := range requested {
+		named[name] = true
+	}
 	if len(requested) > 0 {
 		order, err = deploykit.FilterBox(order, requested, resolved)
 		if err != nil {
@@ -61,21 +65,23 @@ func resolveBoxViewsWithTagScope(cfg *spec.Config, layers map[string]spec.CandyR
 		}
 		produced = order
 	}
-	stampBuildOutput(resolved, produced, targetTag)
+	stampBuildOutput(resolved, produced, named, targetTag)
 	return resolved, order, nil
 }
 
 // stampBuildOutput applies the caller's `--tag` to exactly the boxes this build PRODUCES. A
 // borrowed BUILDER is excluded even when the build does rebuild it: its tag belongs to the
-// repository that owns it (D-KIND-2), and the drive then resolves the builder by the CalVer it
-// was built under — which is also the ref the local store actually holds.
-func stampBuildOutput(resolved map[string]*buildkit.ResolvedBox, produced []string, tag string) {
+// repository that owns it (D-KIND-2), and the drive then resolves the builder by the CalVer it was
+// built under — which is also the ref the local store actually holds. The one exception is a
+// request that NAMES the builder as its target (`charly box build <builder> --tag <t>`): then the
+// caller is building that node deliberately, so the override is theirs to set.
+func stampBuildOutput(resolved map[string]*buildkit.ResolvedBox, produced []string, named map[string]bool, tag string) {
 	if tag == "" {
 		return
 	}
 	builders := builderNodeNames(resolved)
 	for _, name := range produced {
-		if builders[name] {
+		if builders[name] && !named[name] {
 			continue
 		}
 		retagBox(resolved[name], tag)

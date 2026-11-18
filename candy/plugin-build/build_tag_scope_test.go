@@ -44,7 +44,7 @@ func tagScopeFixture() *spec.Config {
 				Builder: spec.BuilderMap{"pixi": "arch-builder"},
 			},
 			"arch-builder": {
-				Base: archBase, Build: []string{"pac"}, Distro: []string{"arch"},
+				Base: "arch", Build: []string{"pac"}, Distro: []string{"arch"},
 				Produce: []string{"pixi"},
 			},
 			"app": {
@@ -159,6 +159,23 @@ func TestBuildTagScope_NoOverrideLeavesEveryNodeOnTheSharedTag(t *testing.T) {
 	for _, name := range []string{"app", "arch", "arch-a", "arch-builder"} {
 		assertBoxTag(t, resolved, name, tagScopeBorrowed)
 	}
+}
+
+// TestBuildTagScope_NamingABuilderStillTakesTheOverride covers the other half of the rule: when the
+// request NAMES the builder as its target, the caller is building that node deliberately and the
+// override applies to it (and to its base), rather than being swallowed by the borrowed exemption.
+func TestBuildTagScope_NamingABuilderStillTakesTheOverride(t *testing.T) {
+	resolved, _, err := resolveBoxViewsWithTagScope(
+		tagScopeFixture(), tagScopeLayers(),
+		[]string{"arch-builder"}, false, "",
+		tagScopeBorrowed, tagScopeTarget,
+		&spec.DistroConfig{}, &spec.BuilderConfig{},
+	)
+	if err != nil {
+		t.Fatalf("resolveBoxViewsWithTagScope: %v", err)
+	}
+	assertBoxTag(t, resolved, "arch-builder", tagScopeTarget)
+	assertBoxTag(t, resolved, "arch", tagScopeTarget)
 }
 
 // assertBoxTag pins BOTH tag-bearing fields: FullTag is what the emitted Containerfile's
