@@ -182,11 +182,16 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 	}
 
 	// --- 8. RENDER-PREP (pure deploykit.Generator method) fills the per-box build-render caches ---
-	// Tag is deliberately NOT set: there is no single build tag any more (every box carries its OWN
-	// resolved tag, and FullTag is what the emitted FROM/COPY names), and no Generator method reads
-	// it — deploykit.NewRenderGeneratorFromProject sets it to "" with the same rationale.
+	// Tag carries the BORROWED tag, because there is no single build tag any more: every box carries
+	// its OWN resolved tag, and FullTag is what the emitted FROM/COPY names. The field stays
+	// POPULATED rather than zeroed: it is an EXPORTED field of an SDK type, and the sdk module this
+	// build compiles against reads it nowhere (its one `.Tag` site on a *Generator is
+	// NewRenderGeneratorFromProject's own write), which proves nothing about an out-of-tree reader.
+	// borrowedTag is the only value that describes the resolve as a whole — the tag every borrowed
+	// node keeps, and the one a bare build (no `--tag`) has always written here.
 	dg := deploykit.NewRenderGenerator()
 	dg.Dir = dir
+	dg.Tag = borrowedTag
 	dg.Config = cfg
 	dg.Candies = layers
 	dg.Boxes = resolved
