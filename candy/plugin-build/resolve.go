@@ -121,15 +121,25 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 	}
 
 	// --- 6. RESOLVE boxes (pure sdk) ---
-	// Stamp the build tag ONCE plugin-side when the host leaves it empty (bare `charly box generate`,
-	// the builder-bootstrap re-dispatch), then thread it through the whole resolve — including the
-	// namespace walk (resolve_legs.go's fillNamespacedBoxes) — so every box view is stamped with the
-	// SAME tag (ComputeCalVer is clock-derived; computing it twice would diverge).
-	tag := req.Tag
-	if tag == "" {
-		tag = buildkit.ComputeCalVer()
+	// TWO tag roles, not one (build_tag_scope.go owns the rule):
+	//
+	//   borrowedTag — the tag a box's OWNING repository would give it, computed ONCE here
+	//                 (ComputeCalVer is clock-derived; computing it twice would diverge across a
+	//                 clock tick). Every box this build does not PRODUCE keeps it: a builder is a
+	//                 vocabulary node owned by the distro repo that declares it (DESIGN.md
+	//                 D-KIND-2), so a caller's `--tag` must never rename one — doing so made the
+	//                 drive resolve a builder ref no registry serves instead of the CalVer already
+	//                 in the local store.
+	//   targetTag   — the caller's `--tag`, stamped on the boxes this build does produce. It is
+	//                 load-bearing: `charly check run` builds the bed's image with the run's tag and
+	//                 verifies the artifact BY that tag (opencharly/plugin-check#115).
+	//
+	// With no `--tag` the two collapse onto the ONE CalVer a bare build has always used.
+	borrowedTag := buildkit.ComputeCalVer()
+	targetTag := req.Tag
+	if targetTag == "" {
+		targetTag = borrowedTag
 	}
-	ropts := boxBuildkitOpts(boxes, req.IncludeDisabled, distroCfg, builderCfg)
 	// The init `depends_candy:` injection: a box composing service candies gets the ACTIVE init
 	// system's own candy (container → supervisord; machine venue → systemd, which declares none)
 	// added to its composition. MUST run here — after the candy scan (it resolves the init over the
@@ -138,14 +148,13 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 	// it here is what carries the injected candy into the intermediate trie, the render candy order,
 	// the emitted Containerfile, the baked labels AND the collected ai.opencharly.description plan.
 	deploykit.InjectInitDependsCandy(cfg, layers, initCfg)
-	resolved, err := buildkit.ResolveAllBox(cfg, tag, dir, ropts)
+	// Resolve → auto-intermediates → tag roles, in the ONE order that keeps "produced" knowable
+	// (the filtered build order is what defines a target's own chain). The returned order is the
+	// FULL order for a full build and the filtered target order for a named selection — the same
+	// order step 9 used to recompute.
+	resolved, order, err := resolveBoxViewsWithTagScope(cfg, layers, boxes, req.IncludeDisabled, dir, borrowedTag, targetTag, distroCfg, builderCfg)
 	if err != nil {
 		return spec.BuildResolveReply{Error: errString(err)}, nil
-	}
-	// auto-intermediates + global candy order (pure sdk).
-	resolved, err = deploykit.ComputeIntermediates(resolved, layers, intermediateDefaults(cfg), tag)
-	if err != nil {
-		return spec.BuildResolveReply{Error: errString(fmt.Errorf("computing intermediates: %w", err))}, nil
 	}
 	globalOrder, err := deploykit.GlobalCandyOrder(resolved, layers)
 	if err != nil {
@@ -173,9 +182,16 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 	}
 
 	// --- 8. RENDER-PREP (pure deploykit.Generator method) fills the per-box build-render caches ---
+	// Tag carries the BORROWED tag, because there is no single build tag any more: every box carries
+	// its OWN resolved tag, and FullTag is what the emitted FROM/COPY names. The field stays
+	// POPULATED rather than zeroed: it is an EXPORTED field of an SDK type, and the sdk module this
+	// build compiles against reads it nowhere (its one `.Tag` site on a *Generator is
+	// NewRenderGeneratorFromProject's own write), which proves nothing about an out-of-tree reader.
+	// borrowedTag is the only value that describes the resolve as a whole — the tag every borrowed
+	// node keeps, and the one a bare build (no `--tag`) has always written here.
 	dg := deploykit.NewRenderGenerator()
 	dg.Dir = dir
-	dg.Tag = tag
+	dg.Tag = borrowedTag
 	dg.Config = cfg
 	dg.Candies = layers
 	dg.Boxes = resolved
@@ -186,17 +202,7 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 		return spec.BuildResolveReply{Error: errString(err)}, nil
 	}
 
-	// --- 9. build ORDER (+ user-context applied post-render-prep, mirroring the host order) ---
-	order, err := deploykit.ResolveBoxOrder(resolved, layers)
-	if err != nil {
-		return spec.BuildResolveReply{Error: errString(fmt.Errorf("resolving box order: %w", err))}, nil
-	}
-	if len(boxes) > 0 {
-		order, err = deploykit.FilterBox(order, boxes, resolved)
-		if err != nil {
-			return spec.BuildResolveReply{Error: errString(fmt.Errorf("scoping generation to requested boxes: %w", err))}, nil
-		}
-	}
+	// --- 9. user-context applied post-render-prep, in the build order the drive will use ---
 	// resolveUserContext, reproduced plugin-side (post-render-prep, per-box in order — the SAME order
 	// the former host hostBuildBuildResolve used). External-base user probe rides InvokeProvider(verb:oci).
 	for _, name := range order {
@@ -204,7 +210,10 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 	}
 
 	// --- 10. project the resolved-project ENVELOPE (pure loaderkit assembler + plugin seams) ---
-	rp, err := projectResolvedProjectLeg(ctx, ex, cfg, layers, uf, distroCfg, builderCfg, initCfg, dir, uf.Version, tag, req.IncludeDisabled, resolved, nil)
+	// The envelope's OWN fresh resolves — the namespaced box views this build did not pre-resolve —
+	// are borrowed nodes too, so they are stamped with the borrowed tag; the pre-resolved boxes keep
+	// the role step 6 gave them.
+	rp, err := projectResolvedProjectLeg(ctx, ex, cfg, layers, uf, distroCfg, builderCfg, initCfg, dir, uf.Version, borrowedTag, req.IncludeDisabled, resolved, nil)
 	if err != nil {
 		return spec.BuildResolveReply{Error: errString(fmt.Errorf("projecting resolved-project envelope: %w", err))}, nil
 	}
