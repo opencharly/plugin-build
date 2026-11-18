@@ -14,8 +14,9 @@ plugin-build:
             local scan, the git fetch, the build-time plugin connect, the host-fs prep) over a small
             `buildengine-*` HostBuild leg family; the layer MERGE crosses to verb:oci via
             InvokeProvider (no HostBuild("merge") seam). Each image is built with BuildKit, its
-            export NAMED with `io.containerd.image.name=<FullTag>`, written to the engine-neutral
-            CHARLY IMAGE STORE (one OCI layout at $XDG_DATA_HOME/charly/images, see imagestore.go),
+            export NAMED with `io.containerd.image.name=<FullTag>`, ingested by the engine-neutral
+            CHARLY IMAGE STORE (the `registry` named store under the cache root, in sdk/storekit — see
+            imagestore.go),
             and materialised into the configured container backend with NO tag step — the
             annotation names the image on load. A parent box present in the store is supplied to
             the solve as an `--oci-layout` named context (buildkitdrive.Build.OCILayouts), so a

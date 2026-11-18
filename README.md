@@ -13,9 +13,10 @@ git fetch, the build-time plugin connect, the host-fs prep) over a small
 `buildengine-*` `HostBuild` leg family. The layer merge crosses to `verb:oci`
 via `InvokeProvider`.
 
-Each build's export is NAMED with `io.containerd.image.name=<FullTag>`, written
-to the **charly image store** — one engine-neutral OCI layout at
-`$XDG_DATA_HOME/charly/images` (override `CHARLY_IMAGE_STORE_DIR`) — and then
+Each build's export is NAMED with `io.containerd.image.name=<FullTag>`, ingested
+by the **charly image store** — the `registry` named store under the cache root
+(`$XDG_CACHE_HOME/charly/registry`, relocated only by `CHARLY_CACHE_DIR`; the
+store itself lives in `sdk/storekit`, opencharly/sdk#460) — and then
 materialised into the run engine. The import needs **no tag step**: the
 annotation names the image on load, and the drive verifies the reference
 resolves. A parent box present in the store is supplied to the solve as an

@@ -4,10 +4,10 @@ package build
 // this file no longer drives an engine at all.
 //
 // ⚑ One builder: BuildKit. The Containerfile is built by the buildkitdrive kit (daemon ensure +
-// `buildctl` argv). The export is NAMED with `io.containerd.image.name=<FullTag>`, written to the
-// CHARLY IMAGE STORE (one engine-neutral OCI layout at $XDG_DATA_HOME/charly/images — see
-// imagestore.go), and then materialised into the run engine, because every later read of it — its
-// capability labels, its deploy, its status, its inline merge, `charly clean` — resolves it
+// `buildctl` argv). The export is NAMED with `io.containerd.image.name=<FullTag>`, ingested by the
+// CHARLY IMAGE STORE (the engine-neutral `registry` named store under the cache root — see
+// imagestore.go and sdk/storekit), and then materialised into the run engine, because every later
+// read of it — its capability labels, its deploy, its status, its inline merge — resolves it
 // through that engine. The import needs NO tag step: the annotation names the image (measured on
 // podman/docker/nerdctl), and the import verifies the reference resolves.
 //
@@ -33,6 +33,7 @@ import (
 	"github.com/opencharly/sdk/buildkit"
 	"github.com/opencharly/sdk/buildkitdrive"
 	"github.com/opencharly/sdk/kit"
+	"github.com/opencharly/sdk/storekit"
 	"github.com/opencharly/spec/container"
 	"github.com/opencharly/spec/spec"
 )
@@ -159,7 +160,7 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 
 	// A parent box built LOCALLY is supplied from the charly image store, not the registry: the
 	// daemon is handed the store as an OCI layout and the base reference is bound to the parent's
-	// manifest digest as a NAMED CONTEXT, which is the one form the dockerfile frontend resolves
+	// stored digest as a NAMED CONTEXT, which is the one form the dockerfile frontend resolves
 	// from buildkit's `--oci-layout` store (measured — `FROM oci-layout://` itself is not a valid
 	// dockerfile reference). The registry stays the fallback: when the base is absent from the
 	// store, nothing is bound and the daemon resolves the reference normally.
@@ -170,29 +171,10 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	// not exist (measured: `check run check-openwebui-pod` died at
 	// `[internal] load metadata for ghcr.io/opencharly/arch-builder:<tag>: not found`, on
 	// the unmodified main tree as well).
-	localRefs := containerfileStageRefs(containerfile)
-	var bindings []string
-	if len(localRefs) > 0 {
-		storeDir, serr := imageStoreDir()
-		if serr != nil {
-			return serr
-		}
-		for _, ref := range localRefs {
-			digest, found, serr := storeLookup(ref)
-			if serr != nil {
-				return serr
-			}
-			if !found {
-				continue
-			}
-			if len(bindings) == 0 {
-				build.OCILayouts = []buildkitdrive.OCILayout{{ID: imageStoreID, Dir: storeDir}}
-			}
-			bindings = append(bindings, ref+"=oci-layout://"+imageStoreID+"@"+digest)
-			fmt.Fprintf(os.Stderr, "--- %s: %s from the charly image store ---\n", box.Name, ref)
-		}
+	bindings, err := bindStoreContexts(&build, box, containerfile)
+	if err != nil {
+		return err
 	}
-
 	args, err := build.Args(dest)
 	if err != nil {
 		return err
@@ -231,7 +213,11 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	if err := annotateExport(dest, box.FullTag, created); err != nil {
 		return fmt.Errorf("naming the %s export: %w", box.Name, err)
 	}
-	if err := storeAdd(dest, box.FullTag); err != nil {
+	store, err := storekit.OpenImageStore()
+	if err != nil {
+		return fmt.Errorf("opening the charly image store: %w", err)
+	}
+	if err := store.Add(dest, box.FullTag); err != nil {
 		return fmt.Errorf("storing %s in the charly image store: %w", box.Name, err)
 	}
 	if err := importExport(ctx, runner, c.RunEngine, dest, box.FullTag); err != nil {
@@ -245,6 +231,42 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 		return fmt.Errorf("removing the export %s: %w", dest, err)
 	}
 	return nil
+}
+
+// bindStoreContexts hands the solve every stage reference this host can already resolve from the
+// charly image store, as an OCI-layout source plus one `--opt context:<ref>=oci-layout://<id>@<digest>`
+// binding per match, and returns those binding arguments.
+//
+// The store is asked, never composed: `storekit.OpenImageStore` resolves the `registry` named
+// store under the cache root (D-STORE-1's ONE override is `CHARLY_CACHE_DIR`), and `Dir()` is the
+// layout the daemon is given. A store that holds nothing answers "not found" rather than failing,
+// so a first build on a fresh host binds nothing and the registry resolves the references
+// normally.
+func bindStoreContexts(build *buildkitdrive.Build, box spec.BuildResolveBox, containerfile string) ([]string, error) {
+	localRefs := containerfileStageRefs(containerfile)
+	if len(localRefs) == 0 {
+		return nil, nil
+	}
+	store, err := storekit.OpenImageStore()
+	if err != nil {
+		return nil, err
+	}
+	var bindings []string
+	for _, ref := range localRefs {
+		digest, found, err := store.Lookup(ref)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			continue
+		}
+		if len(bindings) == 0 {
+			build.OCILayouts = []buildkitdrive.OCILayout{{ID: ociLayoutID, Dir: store.Dir()}}
+		}
+		bindings = append(bindings, ref+"=oci-layout://"+ociLayoutID+"@"+digest)
+		fmt.Fprintf(os.Stderr, "--- %s: %s from the charly image store ---\n", box.Name, ref)
+	}
+	return bindings, nil
 }
 
 // importExport materialises an ANNOTATED OCI archive into the run engine and proves the reference
@@ -266,7 +288,7 @@ func importExport(ctx context.Context, r buildkitdrive.Runner, runEngine, tarPat
 	}
 	probe := append(append([]string{}, capability.ImageExistsArgv...), ref)
 	if _, err := r.Run(ctx, engine, probe...); err != nil {
-		return fmt.Errorf("the loaded image is not resolvable as %s — the archive's %s annotation is what names it: %w", ref, imageNameAnnotation, err)
+		return fmt.Errorf("the loaded image is not resolvable as %s — the archive's %s annotation is what names it: %w", ref, storekit.AnnotationImageName, err)
 	}
 	return nil
 }

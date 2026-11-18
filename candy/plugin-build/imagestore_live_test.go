@@ -1,6 +1,6 @@
 package build
 
-// imagestore_live_test.go — the LIVE proof of the two claims W3.6 rests on.
+// imagestore_live_test.go — the LIVE proof of the two claims the build drive rests on.
 //
 // Both tests SKIP VISIBLY when the toolchain is absent (R8) and are never mocked. They live in the
 // module for the same reason buildkit_live_test.go does: assembling `charly` requires every pinned
@@ -8,7 +8,8 @@ package build
 //
 //  1. The OCI naming annotation, WITH ITS NEGATIVE CONTROL. A `name=<full-ref>` export imports
 //     tagged; the same archive with the annotation stripped imports DANGLING. That is what proves
-//     the annotation — not coincidence, and not a tag step — is doing the naming.
+//     the annotation — not coincidence, and not a tag step — is doing the naming. The build also
+//     leaves its image in the shared store under a digest.
 //  2. A box-on-box build whose parent is in the charly image store while the parent's registry is
 //     UNREACHABLE, with the control that the same child fails without the store binding.
 
@@ -22,17 +23,18 @@ import (
 
 	"github.com/opencharly/sdk/buildkitdrive"
 	"github.com/opencharly/sdk/kit"
+	"github.com/opencharly/sdk/storekit"
 	"github.com/opencharly/spec/spec"
 )
 
-// liveStoreDir points a live run at a store. A check must NEVER mutate the operator's store, so
-// the default is a temp dir; a caller that already exported CHARLY_IMAGE_STORE_DIR (a disposable
-// bed, or a run keeping its emitted evidence) keeps its own.
+// liveStoreDir points a live run at a throwaway cache root. A check must NEVER mutate the
+// operator's store, and `CHARLY_CACHE_DIR` is D-STORE-1's ONE relocation lever — the same one a
+// disposable bed uses. A caller that already exported it (a bed, or a run keeping its emitted
+// evidence) keeps its own.
 func liveStoreDir(t *testing.T) {
 	t.Helper()
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if os.Getenv(imageStoreDirEnv) == "" {
-		t.Setenv(imageStoreDirEnv, t.TempDir())
+	if os.Getenv("CHARLY_CACHE_DIR") == "" {
+		t.Setenv("CHARLY_CACHE_DIR", t.TempDir())
 	}
 }
 
@@ -70,25 +72,60 @@ func TestImageStore_AnnotationNamesTheImport_AndItsAbsenceDoesNot(t *testing.T) 
 	if !kit.LocalImageExists("podman", named) {
 		t.Fatalf("%s does not resolve after the import — the naming annotation did not take", named)
 	}
-	digest, ok, err := storeLookup(named)
-	if err != nil || !ok || digest == "" {
-		t.Fatalf("the charly image store has no entry for %s (ok=%v, err=%v)", named, ok, err)
-	}
-	idx, err := readStoreIndex(mustStoreDir(t))
+
+	// The build's image is an ENTRY of the shared store, under a digest. The entry's annotations
+	// are read through the STORE's own inventory: `ImageStore.List`/`Lookup` answer a reference,
+	// and `Entries` is the key-and-annotation view the sweep reads (D-STORE-7).
+	store, err := storekit.OpenImageStore()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("OpenImageStore: %v", err)
+	}
+	digest, ok, err := store.Lookup(named)
+	if err != nil || !ok || digest == "" {
+		t.Fatalf("the charly image store has no entry for %s (ok=%v, digest=%q, err=%v)", named, ok, digest, err)
+	}
+	entries, err := storekit.OpenStore(storekit.ImageStoreName)
+	if err != nil {
+		t.Fatalf("open the store inventory: %v", err)
+	}
+	inventory, err := entries.Entries()
+	if err != nil {
+		t.Fatalf("read the store entries: %v", err)
 	}
 	found := false
-	for _, m := range idx.Manifests {
-		if m.Annotations[imageNameAnnotation] == named {
-			found = true
-			if m.Annotations[createdAnnotation] == "" {
-				t.Errorf("the store entry for %s carries no %s", named, createdAnnotation)
-			}
+	for _, e := range inventory {
+		if e.Annotations[storekit.AnnotationImageName] != named {
+			continue
+		}
+		found = true
+		if e.Key != digest {
+			t.Errorf("the entry annotated %s is keyed %s, want the digest %s `Lookup` resolved",
+				named, e.Key, digest)
+		}
+		if e.Annotations[storekit.AnnotationCreated] == "" {
+			t.Errorf("the store entry for %s carries no %s", named, storekit.AnnotationCreated)
 		}
 	}
 	if !found {
-		t.Fatalf("no store entry is annotated %s=%s", imageNameAnnotation, named)
+		t.Fatalf("no store entry is annotated %s=%s", storekit.AnnotationImageName, named)
+	}
+
+	// The store the build wrote is DISCOVERABLE by name: `charly clean --cache` sweeps what
+	// `NamedStores` lists (a store it cannot see would grow forever — D-STORE-7), and the sweep
+	// reads the layout marker, so this is also the check that the build left one.
+	names, err := storekit.NamedStores()
+	if err != nil {
+		t.Fatalf("NamedStores: %v", err)
+	}
+	listed := false
+	for _, name := range names {
+		if name == storekit.ImageStoreName {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Fatalf("NamedStores() = %v does not list %q — the sweep cannot see the store the build wrote",
+			names, storekit.ImageStoreName)
 	}
 
 	// THE CONTROL: a DIFFERENT image, exported with a name and then stripped of the naming
@@ -116,10 +153,10 @@ func TestImageStore_AnnotationNamesTheImport_AndItsAbsenceDoesNot(t *testing.T) 
 	if _, err := runner.Run(ctx, buildkitdrive.BuildctlBinary, args...); err != nil {
 		t.Fatalf("building the control image: %v", err)
 	}
-	if err := rewriteExportIndex(controlTar, func(idx *storeIndex) {
+	if err := rewriteExportIndex(controlTar, func(idx *ociIndex) {
 		for i := range idx.Manifests {
-			delete(idx.Manifests[i].Annotations, imageNameAnnotation)
-			delete(idx.Manifests[i].Annotations, refNameAnnotation)
+			delete(idx.Manifests[i].Annotations, storekit.AnnotationImageName)
+			delete(idx.Manifests[i].Annotations, storekit.AnnotationRefName)
 		}
 	}); err != nil {
 		t.Fatalf("stripping the control's naming annotation: %v", err)
@@ -129,7 +166,7 @@ func TestImageStore_AnnotationNamesTheImport_AndItsAbsenceDoesNot(t *testing.T) 
 	cerr := importExport(ctx, runner, "podman", controlTar, control)
 	if cerr == nil {
 		t.Fatalf("an archive with NO %s annotation imported and reported %s resolvable — the "+
-			"annotation would not be what names the image", imageNameAnnotation, control)
+			"annotation would not be what names the image", storekit.AnnotationImageName, control)
 	}
 	if !strings.Contains(cerr.Error(), "not resolvable") {
 		t.Fatalf("the control failed BEFORE the reference check (%v) — the load, not the naming, "+
@@ -138,16 +175,6 @@ func TestImageStore_AnnotationNamesTheImport_AndItsAbsenceDoesNot(t *testing.T) 
 	if kit.LocalImageExists("podman", control) {
 		t.Fatalf("the unnamed control archive landed tagged as %s", control)
 	}
-}
-
-// mustStoreDir is the test's store dir (the env override is set by each test).
-func mustStoreDir(t *testing.T) string {
-	t.Helper()
-	dir, err := imageStoreDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return dir
 }
 
 // A parent in the charly image store is supplied to the solve from the STORE while its registry is
@@ -168,7 +195,11 @@ func TestImageStore_BoxOnBoxBuildsWithTheRegistryUnreachable(t *testing.T) {
 	if err := cfg.buildImage(ctx, spec.BuildResolveBox{Name: "w36parent", FullTag: parentRef}, parentFile); err != nil {
 		t.Fatalf("building the parent: %v", err)
 	}
-	if _, ok, err := storeLookup(parentRef); err != nil || !ok {
+	store, err := storekit.OpenImageStore()
+	if err != nil {
+		t.Fatalf("OpenImageStore: %v", err)
+	}
+	if _, ok, err := store.Lookup(parentRef); err != nil || !ok {
 		t.Fatalf("the parent is not in the charly image store (ok=%v, err=%v)", ok, err)
 	}
 
