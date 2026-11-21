@@ -484,32 +484,40 @@ func fillNamespacedBoxes(ctx context.Context, ex *sdk.Executor, uf *spec.Unified
 				// only content is its owned skills is not empty (opencharly/sdk#598). This fold is
 				// best-effort like the rest of the namespace walk, so a malformed skill node in an
 				// imported repo projects the candy without ownership and is reported as a
-				// gate-failing warning, never dropped silently.
+				// gate-failing warning, never dropped silently: the error is reported BEFORE the
+				// ok test, so the guarantee holds whatever ProjectCandy returns beside it.
 				m, v, ok, err := deploykit.ProjectCandy(c, name, subUF.PluginKinds["skill"])
-				if !ok {
-					continue
-				}
 				if err != nil {
 					stderrWarn(spec.DiagWarning, "namespace %s: %v", child, err)
 				}
-				if rp.Candies == nil {
-					rp.Candies = map[string]spec.CandyView{}
-					rp.CandyModels = map[string]spec.CandyModel{}
-				}
-				recorded, exists := rp.CandyModels[name]
-				if !exists {
-					rp.Candies[name] = v
-					rp.CandyModels[name] = m
+				if !ok {
 					continue
 				}
-				// Already recorded by another scope: keep that record, but merge in the ownership
-				// THIS scope projects — only the scope that authors a candy's skill nodes can see
-				// them, and it need not be the first to record the candy (deploykit.UnionOwnedSkills).
-				recorded.Skills = deploykit.UnionOwnedSkills(recorded.Skills, m.Skills)
-				rp.CandyModels[name] = recorded
+				foldNamespaceCandy(rp, name, m, v)
 			}
 			deploykit.FillNamespaceBoxViews(sub, nsLayers, ic, child, cv, d, vopts, content, rp)
 		}
 		fillNamespacedBoxes(ctx, ex, subUF, ic, child, cv, d, includeDisabled, distroCfg, builderCfg, content, rp, ancestors)
 	}
+}
+
+// foldNamespaceCandy records one candy a namespace scope scanned. The first scope to record a
+// candy keeps its view and model; a later scope merges in only the skill ownership it projects,
+// because only the scope that authors a candy's skill nodes can see them, and it need not be the
+// first to record the candy (deploykit.UnionOwnedSkills). Without the merge an imported carrier
+// whose skills live in a scope walked second reads as empty and validate refuses it
+// (opencharly/sdk#598, measured on pod-kde-cstream importing distro-arch).
+func foldNamespaceCandy(rp *spec.ResolvedProject, name string, m spec.CandyModel, v spec.CandyView) {
+	if rp.Candies == nil {
+		rp.Candies = map[string]spec.CandyView{}
+		rp.CandyModels = map[string]spec.CandyModel{}
+	}
+	recorded, exists := rp.CandyModels[name]
+	if !exists {
+		rp.Candies[name] = v
+		rp.CandyModels[name] = m
+		return
+	}
+	recorded.Skills = deploykit.UnionOwnedSkills(recorded.Skills, m.Skills)
+	rp.CandyModels[name] = recorded
 }

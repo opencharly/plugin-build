@@ -196,3 +196,27 @@ func TestFillNamespacedBoxes_DiamondImportWalksBothPaths(t *testing.T) {
 		}
 	}
 }
+
+// TestFoldNamespaceCandy_LaterScopeMergesOwnership is the namespace fold's ownership rule
+// (opencharly/sdk#598): the first scope to record a candy keeps its view and model, and a later
+// scope that authors the candy's skill nodes merges in that ownership. Measured live before the fix:
+// pod-kde-cstream's `arch-skills` was recorded first by a scope holding none of its skill nodes,
+// so the `arch` namespace that owns them was skipped and validate called the carrier empty.
+func TestFoldNamespaceCandy_LaterScopeMergesOwnership(t *testing.T) {
+	rp := &spec.ResolvedProject{}
+	first := spec.CandyView{Name: "arch-skills", Description: "recorded first"}
+	foldNamespaceCandy(rp, "arch-skills", spec.CandyModel{Name: "arch-skills"}, first)
+	foldNamespaceCandy(rp, "arch-skills", spec.CandyModel{Name: "arch-skills", Skills: []string{"arch", "arch-builder"}}, spec.CandyView{Name: "arch-skills", Description: "recorded second"})
+
+	if got := rp.CandyModels["arch-skills"].Skills; len(got) != 2 || got[0] != "arch" || got[1] != "arch-builder" {
+		t.Fatalf("Skills = %v, want the later scope's ownership merged in", got)
+	}
+	if rp.Candies["arch-skills"].Description != "recorded first" || rp.CandyModels["arch-skills"].Name != "arch-skills" {
+		t.Fatalf("view %+v, model %+v — want the first scope's record kept whole", rp.Candies["arch-skills"], rp.CandyModels["arch-skills"])
+	}
+	// A later scope with no ownership of its own never erases what an earlier one projected.
+	foldNamespaceCandy(rp, "arch-skills", spec.CandyModel{Name: "arch-skills"}, spec.CandyView{Name: "arch-skills"})
+	if got := rp.CandyModels["arch-skills"].Skills; len(got) != 2 {
+		t.Fatalf("Skills = %v after a skill-less scope, want the earlier ownership kept", got)
+	}
+}
