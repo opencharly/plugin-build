@@ -365,14 +365,16 @@ func inspectUserLeg(ctx context.Context, ex *sdk.Executor, ref string, uid int) 
 // whose ResolveBox fails instead of aborting — mirroring the deleted host projector's tolerant
 // branch, buildResolvedProjectTolerant); pass nil for the FAIL-FAST behavior 3b's resolveProjectEnvelope
 // relies on (byte-for-byte parity with the original host projector).
-func projectResolvedProjectLeg(ctx context.Context, ex *sdk.Executor, cfg *spec.Config, layers map[string]spec.CandyReader, uf *spec.UnifiedFile, distroCfg *spec.DistroConfig, builderCfg *spec.BuilderConfig, initCfg *buildkit.InitConfig, dir, version, calver string, includeDisabled bool, preResolvedBoxes map[string]*buildkit.ResolvedBox, diags *spec.Diagnostics) (*spec.ResolvedProject, error) {
+// content is how a namespace view's render-prep asks the content kinds (owned_content.go): the build
+// passes the real source; a resolve that renders nothing passes the zero value, which asks no kind.
+func projectResolvedProjectLeg(ctx context.Context, ex *sdk.Executor, cfg *spec.Config, layers map[string]spec.CandyReader, uf *spec.UnifiedFile, distroCfg *spec.DistroConfig, builderCfg *spec.BuilderConfig, initCfg *buildkit.InitConfig, dir, version, calver string, includeDisabled bool, preResolvedBoxes map[string]*buildkit.ResolvedBox, content deploykit.OwnedContentSource, diags *spec.Diagnostics) (*spec.ResolvedProject, error) {
 	includeNames := map[string]bool{}
 	seams := loaderkit.ResolveProjectSeams{
 		ResolveBox: func(c *spec.Config, name, cv, d string) (*buildkit.ResolvedBox, error) {
 			return buildkit.ResolveBox(c, name, cv, d, buildkit.ResolveOpts{IncludeDisabled: includeDisabled, DistroCfg: distroCfg, BuilderCfg: builderCfg})
 		},
 		FillNamespacedBoxes: func(rootUF *spec.UnifiedFile, ic *buildkit.InitConfig, prefix, cv, d string, rp *spec.ResolvedProject, ancestors loaderkit.NamespaceAncestors) {
-			fillNamespacedBoxes(ctx, ex, rootUF, ic, prefix, cv, d, includeDisabled, distroCfg, builderCfg, rp, ancestors)
+			fillNamespacedBoxes(ctx, ex, rootUF, ic, prefix, cv, d, includeDisabled, distroCfg, builderCfg, content, rp, ancestors)
 		},
 		ResolveResources: func(u *spec.UnifiedFile) map[string]*spec.ResolvedResource {
 			return spec.ResolvePluginKindViaPlugin(u, "resource", resolveResourceLeg(ctx, ex))
@@ -425,7 +427,7 @@ func projectResolvedProjectLeg(ctx context.Context, ex *sdk.Executor, cfg *spec.
 //     own distroCfg/builderCfg/ic;
 //   - every step is best-effort/additive: a namespace whose scan, walk, or fix-point fails
 //     contributes nothing and never aborts the resolve, and recursion into its children continues.
-func fillNamespacedBoxes(ctx context.Context, ex *sdk.Executor, uf *spec.UnifiedFile, ic *buildkit.InitConfig, prefix, cv, d string, includeDisabled bool, distroCfg *buildkit.DistroConfig, builderCfg *buildkit.BuilderConfig, rp *spec.ResolvedProject, ancestors loaderkit.NamespaceAncestors) {
+func fillNamespacedBoxes(ctx context.Context, ex *sdk.Executor, uf *spec.UnifiedFile, ic *buildkit.InitConfig, prefix, cv, d string, includeDisabled bool, distroCfg *buildkit.DistroConfig, builderCfg *buildkit.BuilderConfig, content deploykit.OwnedContentSource, rp *spec.ResolvedProject, ancestors loaderkit.NamespaceAncestors) {
 	if uf == nil {
 		return
 	}
@@ -477,21 +479,37 @@ func fillNamespacedBoxes(ctx context.Context, ex *sdk.Executor, uf *spec.Unified
 				if c == nil {
 					continue
 				}
-				m, v, ok := deploykit.RawCandyPair(c)
+				// ProjectCandy is the ONE candy projection every scope uses, so an imported candy
+				// carries the skill nodes it owns exactly as a root-scope one does — a candy whose
+				// only content is its owned skills is not empty (opencharly/sdk#598). This fold is
+				// best-effort like the rest of the namespace walk, so a malformed skill node in an
+				// imported repo projects the candy without ownership and is reported as a
+				// gate-failing warning, never dropped silently.
+				m, v, ok, err := deploykit.ProjectCandy(c, name, subUF.PluginKinds["skill"])
 				if !ok {
 					continue
+				}
+				if err != nil {
+					stderrWarn(spec.DiagWarning, "namespace %s: %v", child, err)
 				}
 				if rp.Candies == nil {
 					rp.Candies = map[string]spec.CandyView{}
 					rp.CandyModels = map[string]spec.CandyModel{}
 				}
-				if _, exists := rp.CandyModels[name]; !exists {
+				recorded, exists := rp.CandyModels[name]
+				if !exists {
 					rp.Candies[name] = v
 					rp.CandyModels[name] = m
+					continue
 				}
+				// Already recorded by another scope: keep that record, but merge in the ownership
+				// THIS scope projects — only the scope that authors a candy's skill nodes can see
+				// them, and it need not be the first to record the candy (deploykit.UnionOwnedSkills).
+				recorded.Skills = deploykit.UnionOwnedSkills(recorded.Skills, m.Skills)
+				rp.CandyModels[name] = recorded
 			}
-			deploykit.FillNamespaceBoxViews(sub, nsLayers, ic, child, cv, d, vopts, rp)
+			deploykit.FillNamespaceBoxViews(sub, nsLayers, ic, child, cv, d, vopts, content, rp)
 		}
-		fillNamespacedBoxes(ctx, ex, subUF, ic, child, cv, d, includeDisabled, distroCfg, builderCfg, rp, ancestors)
+		fillNamespacedBoxes(ctx, ex, subUF, ic, child, cv, d, includeDisabled, distroCfg, builderCfg, content, rp, ancestors)
 	}
 }

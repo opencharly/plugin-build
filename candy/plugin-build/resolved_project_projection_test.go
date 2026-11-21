@@ -3,6 +3,7 @@ package build
 import (
 	"context"
 	"encoding/json"
+	"github.com/opencharly/sdk/deploykit"
 	"testing"
 
 	"github.com/opencharly/sdk"
@@ -82,7 +83,7 @@ func TestResolvedProject_Projection(t *testing.T) {
 
 	rp, err := projectResolvedProjectLeg(context.Background(), ex, &spec.Config{}, layers, uf,
 		distroCfg, builderCfg, &buildkit.InitConfig{}, t.TempDir(), "2026.100.0000", "2026.100.0000",
-		false, nil, nil)
+		false, nil, deploykit.OwnedContentSource{}, nil)
 	if err != nil {
 		t.Fatalf("projectResolvedProjectLeg: %v", err)
 	}
@@ -132,7 +133,7 @@ func TestFillNamespacedBoxes_QualifiedView(t *testing.T) {
 	builderCfg := &spec.BuilderConfig{}
 	rp, err := projectResolvedProjectLeg(context.Background(), ex, &spec.Config{}, nil, rootUF,
 		distroCfg, builderCfg, &buildkit.InitConfig{}, t.TempDir(), "2026.100.0000", "2026.100.0000",
-		false, nil, nil)
+		false, nil, deploykit.OwnedContentSource{}, nil)
 	if err != nil {
 		t.Fatalf("projectResolvedProjectLeg: %v", err)
 	}
@@ -181,7 +182,7 @@ func TestFillNamespacedBoxes_DiamondImportWalksBothPaths(t *testing.T) {
 
 	rp, err := projectResolvedProjectLeg(context.Background(), ex, &spec.Config{}, nil, rootUF,
 		&spec.DistroConfig{}, &spec.BuilderConfig{}, &buildkit.InitConfig{}, t.TempDir(), "2026.100.0000", "2026.100.0000",
-		false, nil, nil)
+		false, nil, deploykit.OwnedContentSource{}, nil)
 	if err != nil {
 		t.Fatalf("projectResolvedProjectLeg: %v", err)
 	}

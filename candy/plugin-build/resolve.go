@@ -198,6 +198,13 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 	dg.InitConfig = initCfg
 	dg.GlobalOrder = globalOrder
 	dg.DevLocalPkg = req.DevLocalPkg
+	// The content kinds (ops.OpContent): render-prep asks them what each box's composed candies'
+	// owned nodes contribute — skill bodies installed into the image, and their label.
+	content, err := ownedContentSource(ctx, ex)
+	if err != nil {
+		return spec.BuildResolveReply{Error: errString(err)}, nil
+	}
+	dg.Content = content
 	if err := dg.RenderPrepAll(); err != nil {
 		return spec.BuildResolveReply{Error: errString(err)}, nil
 	}
@@ -213,7 +220,7 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 	// The envelope's OWN fresh resolves — the namespaced box views this build did not pre-resolve —
 	// are borrowed nodes too, so they are stamped with the borrowed tag; the pre-resolved boxes keep
 	// the role step 6 gave them.
-	rp, err := projectResolvedProjectLeg(ctx, ex, cfg, layers, uf, distroCfg, builderCfg, initCfg, dir, uf.Version, borrowedTag, req.IncludeDisabled, resolved, nil)
+	rp, err := projectResolvedProjectLeg(ctx, ex, cfg, layers, uf, distroCfg, builderCfg, initCfg, dir, uf.Version, borrowedTag, req.IncludeDisabled, resolved, content, nil)
 	if err != nil {
 		return spec.BuildResolveReply{Error: errString(fmt.Errorf("projecting resolved-project envelope: %w", err))}, nil
 	}
