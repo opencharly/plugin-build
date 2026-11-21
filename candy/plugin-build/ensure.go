@@ -76,7 +76,7 @@ func runBoxEnsure(ctx context.Context, ex *sdk.Executor, req spec.BuildEnsureReq
 	// split, and the bridge is what closed it.
 
 	// Tier 3: resolve + pull + build-fallback.
-	return ensureViaResolveAndBuild(ctx, ex, req.Image, req.Dir, runEngine)
+	return ensureViaResolveAndBuild(ctx, ex, req.Image, req.Dir, runEngine, "")
 }
 
 // ensureViaResolveAndBuild implements tier 3. A remote (@github.com/...) ref resolves via the
@@ -86,12 +86,14 @@ func runBoxEnsure(ctx context.Context, ex *sdk.Executor, req spec.BuildEnsureReq
 // directly, no host seam). Both branches mirror the deleted core ensure-image helper's algorithm
 // verbatim: check existence of the resolved ref, attempt a pull, and on failure fall back to a
 // build.
-func ensureViaResolveAndBuild(ctx context.Context, ex *sdk.Executor, image, dir, runEngine string) error {
+// self names the box whose BASE is being ensured ("" for the build:ensure word, which ensures an
+// image for its own sake): a base can never resolve onto that same box (plugin-build#61).
+func ensureViaResolveAndBuild(ctx context.Context, ex *sdk.Executor, image, dir, runEngine, self string) error {
 	stripped := kit.StripURLScheme(image)
 	if spec.IsRemoteImageRef(stripped) {
 		return ensureRemoteRef(ctx, ex, image, stripped, runEngine)
 	}
-	return ensureProjectRef(ctx, ex, image, dir, runEngine)
+	return ensureProjectRef(ctx, ex, image, dir, runEngine, self)
 }
 
 func ensureRemoteRef(ctx context.Context, ex *sdk.Executor, image, stripped, runEngine string) error {
@@ -219,7 +221,7 @@ func resolveRemoteImageRef(ctx context.Context, ex *sdk.Executor, dir, boxName s
 	return kit.ResolveShellImageRef(registry, boxName, "")
 }
 
-func ensureProjectRef(ctx context.Context, ex *sdk.Executor, image, dir, runEngine string) error {
+func ensureProjectRef(ctx context.Context, ex *sdk.Executor, image, dir, runEngine, self string) error {
 	// Plugin-side self-resolve (#55 coneK1 #8): load the project cfg via the K1 loader reverse
 	// legs + compute all 4 box-ref reply fields directly — NO "box-ref-resolve" HostBuild seam
 	// (deleted) and NO deploykit.ResolveSpecBox (the host-side deploykit call is shed from this
@@ -253,6 +255,13 @@ func ensureProjectRef(ctx context.Context, ex *sdk.Executor, image, dir, runEngi
 
 	if fallbackShort == "" {
 		return fmt.Errorf("ensure-image %q: not present locally, pull failed, and no buildable short-name match in charly.yml — make the registry public, log in to the registry, or pre-build the image manually", image)
+	}
+	// A box can never be its own base: building it to obtain its base would re-enter this very
+	// build and wait forever on its own image lock (plugin-build#61, measured: `box build debian`
+	// with `base: debian:13`). The mapping rules above should never produce it; this is the
+	// invariant stated where the build would start, so a registry-less project cannot hit it.
+	if err := selfBaseError(image, fallbackShort, self); err != nil {
+		return err
 	}
 
 	fmt.Fprintf(os.Stderr, "ensure-image: building %s locally\n", fallbackShort)
@@ -290,9 +299,9 @@ func loadProjectCfgForEnsure(ctx context.Context, ex *sdk.Executor, dir string) 
 // (byte-identical to the former host resolveImageRefForEnsure → deploykit.ResolveSpecBox →
 // buildkit.ResolveBox path: namespace descent via SplitNamespaceRef, resolved.Name = leaf,
 // resolved.Registry = img.Registry || nsCfg.Defaults.Registry, then ResolveShellImageRef).
-// Returns "" when the identifier can't be resolved (nil cfg, box not found) so the caller skips
-// the pull and falls back to a build — mirroring the former host path where a resolve error left
-// ExistsRef/PullRef empty.
+// An identifier that is NOT a box of this project is an external image and is returned as written,
+// so the caller pulls it (`debian:13` is Docker Hub's library/debian — plugin-build#61); only a nil
+// cfg (no project to resolve against) returns "".
 func resolveImageRefPlugin(image string, cfg *spec.Config) string {
 	if image == "" {
 		return ""
@@ -305,7 +314,11 @@ func resolveImageRefPlugin(image string, cfg *spec.Config) string {
 	}
 	img, nsCfg, ok := cfg.ResolveBoxRef(image)
 	if !ok {
-		return ""
+		// Not a box of this project: an external image (`debian:13` is Docker Hub's
+		// library/debian), pulled exactly as written — the engine normalizes a short name. Returning
+		// "" here skipped the pull entirely and sent the ref straight to the build fallback
+		// (plugin-build#61).
+		return image
 	}
 	registry := img.Registry
 	if registry == "" {
@@ -357,9 +370,45 @@ func buildableShortNamePlugin(image string, cfg *spec.Config) string {
 		}
 	}
 	if q, ok := cfg.FindBoxByLeaf(work); ok {
-		return q
+		// A leaf match is the box only when the ref NAMES that box: its bare key, or the box's own
+		// published repository (registry/name). An external image that merely shares the leaf —
+		// Docker Hub's `debian:13` against a project box `debian` — is NOT that box, and building
+		// the box to "obtain" it is how `box build debian` came to wait on its own lock
+		// (plugin-build#61).
+		if image == work || publishedRepository(cfg, q) == repositoryOf(image) {
+			return q
+		}
 	}
 	return ""
+}
+
+// repositoryOf returns an image ref without its tag (a registry port before the first slash is not
+// a tag separator).
+func repositoryOf(ref string) string {
+	firstSlash := strings.Index(ref, "/")
+	lastColon := strings.LastIndex(ref, ":")
+	if lastColon >= 0 && (firstSlash < 0 || lastColon > firstSlash) {
+		return ref[:lastColon]
+	}
+	return ref
+}
+
+// publishedRepository returns the repository a project box is published under — its registry
+// (the box's own, else its namespace's default) and its leaf name — computed from the config alone,
+// with no local-store probe. "" when the box does not resolve.
+func publishedRepository(cfg *spec.Config, box string) string {
+	img, nsCfg, ok := cfg.ResolveBoxRef(box)
+	if !ok {
+		return ""
+	}
+	registry := img.Registry
+	if registry == "" {
+		registry = nsCfg.Defaults.Registry
+	}
+	if registry == "" {
+		return spec.LeafName(box)
+	}
+	return registry + "/" + spec.LeafName(box)
 }
 
 // remoteImageResolve calls the "remote-image-resolve" HostBuild seam.
@@ -410,4 +459,14 @@ func engineTag(ctx context.Context, runEngine, src, dst string) error {
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// selfBaseError refuses a build fallback that would build the box whose base is being ensured: that
+// build re-enters the outer one and waits forever on its own image lock (plugin-build#61). self is
+// "" when the ensure is not for a box's base (the build:ensure word), and nothing is refused then.
+func selfBaseError(image, fallback, self string) error {
+	if self == "" || spec.LeafName(fallback) != spec.LeafName(self) {
+		return nil
+	}
+	return fmt.Errorf("ensure-image %q: box %q's base resolves to %q — the box itself; a box cannot be its own base. Name an image the engine can pull, or a different box", image, self, fallback)
 }
