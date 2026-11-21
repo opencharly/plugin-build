@@ -57,7 +57,7 @@ func baseImageRef(containerfile string) string {
 // It is assigned in init() rather than by a var initializer because the contract reaches BACK into
 // this drive (ensureRemoteRef -> runBoxBuild -> buildImage -> ensureBaseImage -> ensureBase), which a
 // var initializer turns into an initialization cycle the compiler refuses.
-var ensureBase func(ctx context.Context, ex *sdk.Executor, image, dir, runEngine string) error
+var ensureBase func(ctx context.Context, ex *sdk.Executor, image, dir, runEngine, self string) error
 
 func init() { ensureBase = ensureViaResolveAndBuild }
 
@@ -68,8 +68,9 @@ func init() { ensureBase = ensureViaResolveAndBuild }
 // ensure contract the build:ensure word owns (resolve against the project's charly.yml -> pull ->
 // build locally), and when no local build is possible the failure NAMES the base ref, that it could
 // not be fetched, and that no local build was possible — rather than returning a fetch status the
-// reader cannot act on (charly#949).
-func (c driveConfig) ensureBaseImage(ctx context.Context, containerfile string) error {
+// reader cannot act on (charly#949). self is the box whose base this is: the ensure contract never
+// resolves a base onto that same box (plugin-build#61).
+func (c driveConfig) ensureBaseImage(ctx context.Context, containerfile, self string) error {
 	ref := baseImageRef(containerfile)
 	if ref == "" || ref == "scratch" {
 		return nil
@@ -81,7 +82,7 @@ func (c driveConfig) ensureBaseImage(ctx context.Context, containerfile string) 
 	if c.Ex == nil {
 		return fmt.Errorf("base image %s is not present locally and this drive holds no executor to resolve it, so it can neither be pulled nor built here", ref)
 	}
-	if err := ensureBase(ctx, c.Ex, ref, c.Dir, c.RunEngine); err != nil {
+	if err := ensureBase(ctx, c.Ex, ref, c.Dir, c.RunEngine, self); err != nil {
 		return fmt.Errorf("base image %s is not present locally, could not be fetched from its registry (%v), and no local build was possible for it: a registry ref whose recipe is not in this project cannot be built here — name the recipe in this project, or pull it once with a credential, and retry", ref, err)
 	}
 	fmt.Fprintf(os.Stderr, "ensure-image: base %s is now present\n", ref)
@@ -139,7 +140,7 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	// no-op; a miss routes through the SAME ensure contract `build:ensure` owns (resolve against
 	// the project's charly.yml -> pull -> build locally), so a recipe sitting in this very project
 	// is used instead of surfacing as the registry's auth error (charly#949).
-	if err := c.ensureBaseImage(ctx, containerfile); err != nil {
+	if err := c.ensureBaseImage(ctx, containerfile, box.Name); err != nil {
 		return err
 	}
 

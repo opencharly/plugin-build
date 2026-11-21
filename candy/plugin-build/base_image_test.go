@@ -32,7 +32,7 @@ func TestBaseImageRef(t *testing.T) {
 func TestEnsureBaseImage_NoOpForScratchAndEmpty(t *testing.T) {
 	var c driveConfig // no RunEngine, no Ex
 	for _, cf := range []string{"", "FROM scratch\n", "ARG BASE_IMAGE=scratch\n\nFROM ${BASE_IMAGE}\n"} {
-		if err := c.ensureBaseImage(context.Background(), cf); err != nil {
+		if err := c.ensureBaseImage(context.Background(), cf, ""); err != nil {
 			t.Errorf("ensureBaseImage(%q) = %v, want nil (nothing to ensure)", cf, err)
 		}
 	}
@@ -48,7 +48,7 @@ func TestEnsureBaseImage_RefusesWithoutAnExecutor(t *testing.T) {
 	cf := "ARG BASE_IMAGE=" + ref + "\n\nFROM ${BASE_IMAGE}\n"
 	c := driveConfig{RunEngine: "podman"} // no Ex — the arm under test
 
-	err := c.ensureBaseImage(context.Background(), cf)
+	err := c.ensureBaseImage(context.Background(), cf, "")
 	if err == nil {
 		t.Fatalf("ensureBaseImage(%q) on a drive with no executor = nil, want a refusal naming the base", ref)
 	}
@@ -83,7 +83,7 @@ func TestEnsureBaseImage_PresentBaseIsANoOp(t *testing.T) {
 	}
 	cf := "ARG BASE_IMAGE=" + ref + "\n\nFROM ${BASE_IMAGE}\n"
 	c := driveConfig{RunEngine: "podman"} // no Ex: a lookup that reached the executor would fail here
-	if err := c.ensureBaseImage(context.Background(), cf); err != nil {
+	if err := c.ensureBaseImage(context.Background(), cf, ""); err != nil {
 		t.Errorf("ensureBaseImage(%q) with the base already local = %v, want nil (present is a no-op)", ref, err)
 	}
 }
@@ -106,7 +106,7 @@ func TestEnsureBaseImage_RoutesAMissingBaseThroughTheEnsureContract(t *testing.T
 		engine string
 		ex     *sdk.Executor
 	}
-	ensureBase = func(ctx context.Context, ex *sdk.Executor, image, dir, runEngine string) error {
+	ensureBase = func(ctx context.Context, ex *sdk.Executor, image, dir, runEngine, self string) error {
 		got.called, got.image, got.dir, got.engine, got.ex = true, image, dir, runEngine, ex
 		return errors.New("no recipe in this project, and the registry refused")
 	}
@@ -115,7 +115,7 @@ func TestEnsureBaseImage_RoutesAMissingBaseThroughTheEnsureContract(t *testing.T
 	c := driveConfig{RunEngine: "podman", Dir: "/project/dir", Ex: ex}
 	cf := "ARG BASE_IMAGE=" + ref + "\n\nFROM ${BASE_IMAGE}\n"
 
-	err := c.ensureBaseImage(context.Background(), cf)
+	err := c.ensureBaseImage(context.Background(), cf, "")
 	if !got.called {
 		t.Fatalf("a missing base with an executor present must reach the ensure contract; it did not")
 	}
