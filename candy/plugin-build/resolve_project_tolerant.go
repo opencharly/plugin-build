@@ -2,6 +2,7 @@ package build
 
 import (
 	"context"
+	"github.com/opencharly/sdk/deploykit"
 	"os"
 
 	"github.com/opencharly/sdk"
@@ -100,7 +101,7 @@ func resolveProjectEnvelopeTolerant(ctx context.Context, ex *sdk.Executor, req s
 	// preResolvedBoxes=nil (a fresh per-box resolve, mirroring resolveProjectEnvelope); diags
 	// non-nil makes loaderkit.ProjectResolvedProject SKIP a box whose ResolveBox fails instead of
 	// aborting the whole projection (loaderkit.ProjectResolvedProject's own tolerant contract).
-	rp, rerr := projectResolvedProjectLeg(ctx, ex, cfg, layers, uf, distroCfg, builderCfg, initCfg, dir, uf.Version, calver, req.IncludeDisabled, nil, &diags)
+	rp, rerr := projectResolvedProjectLeg(ctx, ex, cfg, layers, uf, distroCfg, builderCfg, initCfg, dir, uf.Version, calver, req.IncludeDisabled, nil, deploykit.OwnedContentSource{}, &diags)
 	if rerr != nil {
 		// projectResolvedProjectLeg itself only returns a hard error for a non-box-resolve failure
 		// (diags==nil never applies here since we always pass a non-nil diags) — tolerant: diagnose,

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/opencharly/sdk/deploykit"
 	"hash"
 	"io/fs"
 	"os"
@@ -114,7 +115,7 @@ func resolveProjectEnvelope(ctx context.Context, ex *sdk.Executor, req spec.Reso
 
 	// preResolvedBoxes=nil: a FRESH per-box ResolveBox loop, no render-prep — byte-identical to the
 	// deleted host projector's own fresh resolve (never fed pre-rendered boxes).
-	rp, err := projectResolvedProjectLeg(ctx, ex, cfg, layers, uf, distroCfg, builderCfg, initCfg, dir, uf.Version, calver, req.IncludeDisabled, nil, nil)
+	rp, err := projectResolvedProjectLeg(ctx, ex, cfg, layers, uf, distroCfg, builderCfg, initCfg, dir, uf.Version, calver, req.IncludeDisabled, nil, deploykit.OwnedContentSource{}, nil)
 	if err != nil {
 		return spec.ResolvedProject{}, err
 	}
