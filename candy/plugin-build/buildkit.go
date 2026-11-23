@@ -23,6 +23,7 @@ package build
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -104,7 +105,7 @@ func imageTags(box spec.BuildResolveBox) []string {
 // block here, then re-use BuildKit's own cache), while DISTINCT images take distinct locks and
 // build in parallel. The wait is spec/lock's bounded-but-REPORTED one: a peer building the same
 // image is a SLOW holder, not a stuck one, so the second builder QUEUES and reports the holder.
-func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, containerfile string) error {
+func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, containerfile string) (err error) {
 	release, err := kit.AcquireImageBuildLock(box.FullTag)
 	if err != nil {
 		return imageBuildLockError(box, err)
@@ -149,6 +150,12 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 		return err
 	}
 	dest := buildkitdrive.ExportFile(stageDir, box.FullTag)
+	// The archive is a full copy of the image with ONE consumer (the bridge below), and a build
+	// that fails — at the build, the annotate, the store ingest, the load or a cancellation —
+	// leaves a partial or 0-byte file under a name no later build reuses. So it goes on EVERY
+	// exit path, joined onto the build's own error so the cleanup can never mask the failure
+	// (buildkitdrive.RemoveExport owns the rule; opencharly/plugin-build#64).
+	defer func() { err = errors.Join(err, buildkitdrive.RemoveExport(dest)) }()
 
 	build := buildkitdrive.Build{
 		Containerfile: cfile,
@@ -197,7 +204,7 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	}
 	fmt.Fprintf(os.Stderr, "\n--- Building %s ---\n", box.Name)
 
-	runner := buildkitdrive.ExecRunner{}
+	runner := buildRunner
 	if _, err := runner.Run(ctx, buildkitdrive.BuildctlBinary, args...); err != nil {
 		return fmt.Errorf("building %s: %w", box.Name, err)
 	}
@@ -223,13 +230,6 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	}
 	if err := importExport(ctx, runner, c.RunEngine, dest, box.FullTag); err != nil {
 		return fmt.Errorf("importing %s into the %s store: %w", box.Name, c.RunEngine, err)
-	}
-
-	// The export is a full copy of the image, and keeping one per build on a persistent root is
-	// storage nobody reclaims (GC for that root is not yet proven), so it goes once the bridge has
-	// succeeded — and a failure to remove it is REPORTED, never swallowed.
-	if err := os.Remove(dest); err != nil {
-		return fmt.Errorf("removing the export %s: %w", dest, err)
 	}
 	return nil
 }
@@ -400,3 +400,9 @@ func buildPlatforms(single string, declared []string) []string {
 	}
 	return declared
 }
+
+// buildRunner is the ONE command runner the drive uses for the build and the bridge. A package
+// var rather than a literal so a test can make the BRIDGE fail while the build still runs — the
+// failure path the export's lifecycle is about (a failed load used to leave its archive behind,
+// opencharly/plugin-build#64).
+var buildRunner buildkitdrive.Runner = buildkitdrive.ExecRunner{}
