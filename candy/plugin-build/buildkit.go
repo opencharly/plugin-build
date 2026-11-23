@@ -97,6 +97,16 @@ func imageTags(box spec.BuildResolveBox) []string {
 	return []string{box.FullTag}
 }
 
+// tailLines returns the last n lines of a captured command output, so a failed build carries its
+// own diagnostics without dumping megabytes into the error. An empty output yields "".
+func tailLines(out string, n int) string {
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
 // buildImage builds one image through the BuildKit drive and bridges it into the run engine's
 // store.
 //
@@ -205,8 +215,14 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	fmt.Fprintf(os.Stderr, "\n--- Building %s ---\n", box.Name)
 
 	runner := buildRunner
-	if _, err := runner.Run(ctx, buildkitdrive.BuildctlBinary, args...); err != nil {
-		return fmt.Errorf("building %s: %w", box.Name, err)
+	// The runner CAPTURES the command's combined output — but this call used to DISCARD it and
+	// wrap only `exit status 1`, so a failed build step left its own error text nowhere: the step
+	// log ended at the RUN line and the daemon log carried no error (measured on
+	// opencharly/charly#1255, where that hid a pacman failure behind five hypotheses). A build's
+	// diagnostics must survive the build: keep the TAIL of the captured output in the error.
+	out, err := runner.Run(ctx, buildkitdrive.BuildctlBinary, args...)
+	if err != nil {
+		return fmt.Errorf("building %s: %w\n%s", box.Name, err, tailLines(out, 60))
 	}
 
 	// Name the archive, then make the image durable in the charly image store, then materialise it
