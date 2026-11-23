@@ -15,6 +15,7 @@ package build
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -139,5 +140,56 @@ func TestBuildImage_LivePushOutsideTargetsIsNotPublished(t *testing.T) {
 	}
 	if !kit.LocalImageExists("podman", tag) {
 		t.Fatalf("the non-target image was not bridged into the %s store — the build did not complete", cfg.RunEngine)
+	}
+}
+
+// failingLoadRunner delegates every command to the real runner EXCEPT the bridge's engine
+// `load`, which it fails: the build and the store ingest succeed, the load cannot, and the
+// export's lifecycle is the only thing that can remove the archive left behind.
+type failingLoadRunner struct{ inner buildkitdrive.Runner }
+
+func (r failingLoadRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	for _, a := range args {
+		if a == "load" {
+			return "", fmt.Errorf("injected bridge failure")
+		}
+	}
+	return r.inner.Run(ctx, name, args...)
+}
+
+// TestBuildImage_RemovesTheExportWhenTheBridgeFails is the FAILURE-path proof for opencharly/
+// plugin-build#64: a real build, a failing bridge, and the staged archive must still be gone.
+// Without the deferred cleanup the archive survives — the 0-byte and partial tarballs the issue
+// measured are exactly this path's residue.
+func TestBuildImage_RemovesTheExportWhenTheBridgeFails(t *testing.T) {
+	liveTools(t, "rootlesskit", "buildkitd", "buildctl", "podman")
+	liveStoreDir(t)
+
+	const tag = "localhost/leg4-fail:2026.287.1201"
+	dir := t.TempDir()
+	cfile := "FROM alpine:3.20\nCMD [\"/bin/true\"]\n"
+
+	cfg := driveConfig{
+		RunEngine: "podman",
+		Dir:       dir,
+		BuildDir:  filepath.Join(dir, ".build"),
+	}
+	box := spec.BuildResolveBox{Name: "leg4fail", FullTag: tag}
+
+	prev := buildRunner
+	buildRunner = failingLoadRunner{inner: buildkitdrive.ExecRunner{}}
+	defer func() { buildRunner = prev }()
+
+	if err := cfg.buildImage(context.Background(), box, cfile); err == nil {
+		t.Fatal("buildImage succeeded although the bridge failed")
+	}
+
+	stage, err := buildkitdrive.StageDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest := buildkitdrive.ExportFile(stage, tag)
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("the export archive %s survived a failed bridge", dest)
 	}
 }
