@@ -1,6 +1,7 @@
 package build
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -28,5 +29,23 @@ func TestTailLines(t *testing.T) {
 	}
 	if got := tailLines("only", 1); strings.HasSuffix(got, "\n") {
 		t.Fatalf("trailing newline leaked into the error: %q", got)
+	}
+}
+
+// TestBuildFailure_CarriesTheCapturedOutput is the test the review asked for: it pins the WIRING
+// (buildFailure is what the call site uses), so deleting the output from the error fails here even
+// if tailLines itself stays green.
+func TestBuildFailure_CarriesTheCapturedOutput(t *testing.T) {
+	err := buildFailure("comfyui-cdi", errors.New("exit status 1"), "#12 [stage-4 5/12] RUN pacman -Syu\n#12 ERROR: process did not complete: exit code: 1\n")
+	if !strings.Contains(err.Error(), "#12 ERROR: process did not complete") {
+		t.Fatalf("the failed step's own output is not in the error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "exit status 1") {
+		t.Fatalf("the underlying error is not in the message: %v", err)
+	}
+	// empty output must not leave a dangling newline (the review's non-blocking note)
+	plain := buildFailure("x", errors.New("boom"), "")
+	if strings.HasSuffix(plain.Error(), "\n") {
+		t.Fatalf("empty output left a trailing newline: %q", plain.Error())
 	}
 }

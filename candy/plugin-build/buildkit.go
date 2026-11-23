@@ -97,6 +97,17 @@ func imageTags(box spec.BuildResolveBox) []string {
 	return []string{box.FullTag}
 }
 
+// buildFailure is the ONE place a failed build's error is built, and the reason it exists as a
+// function: the runner CAPTURES buildctl's combined output, and the caller used to discard it,
+// so a failing step's own error text reached no artifact at all (opencharly/charly#1255). The
+// output's tail goes into the error — bounded, and with no dangling newline when there is none.
+func buildFailure(boxName string, err error, out string) error {
+	if tail := tailLines(out, 60); tail != "" {
+		return fmt.Errorf("building %s: %w\n%s", boxName, err, tail)
+	}
+	return fmt.Errorf("building %s: %w", boxName, err)
+}
+
 // tailLines returns the last n lines of a captured command output, so a failed build carries its
 // own diagnostics without dumping megabytes into the error. An empty output yields "".
 func tailLines(out string, n int) string {
@@ -222,7 +233,7 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	// diagnostics must survive the build: keep the TAIL of the captured output in the error.
 	out, err := runner.Run(ctx, buildkitdrive.BuildctlBinary, args...)
 	if err != nil {
-		return fmt.Errorf("building %s: %w\n%s", box.Name, err, tailLines(out, 60))
+		return buildFailure(box.Name, err, out)
 	}
 
 	// Name the archive, then make the image durable in the charly image store, then materialise it
