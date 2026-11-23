@@ -1,6 +1,9 @@
 package build
 
 import (
+	"context"
+
+	"github.com/opencharly/sdk/buildkitdrive"
 	"errors"
 	"strings"
 	"testing"
@@ -47,5 +50,33 @@ func TestBuildFailure_CarriesTheCapturedOutput(t *testing.T) {
 	plain := buildFailure("x", errors.New("boom"), "")
 	if strings.HasSuffix(plain.Error(), "\n") {
 		t.Fatalf("empty output left a trailing newline: %q", plain.Error())
+	}
+}
+
+// failingBuildctlRunner fails ONLY the buildctl command, returning captured output — the seam the
+// review asked for. Everything else succeeds, so buildImage reaches the line that must pass `out`.
+type failingBuildctlRunner struct{ out string }
+
+func (f failingBuildctlRunner) Run(_ context.Context, name string, _ ...string) (string, error) {
+	if name == buildkitdrive.BuildctlBinary {
+		return f.out, errors.New("exit status 1")
+	}
+	return "", nil
+}
+
+// TestRunBuildctl_PutsTheCapturedOutputInTheError exercises the CALL SITE that used to discard the
+// output: buildImage's build call now goes through runBuildctl, and reverting that to
+// `if _, err := runner.Run(...)` makes this test fail while buildFailure/tailLines stay green.
+func TestRunBuildctl_PutsTheCapturedOutputInTheError(t *testing.T) {
+	prev := buildRunner
+	buildRunner = failingBuildctlRunner{out: "#12 [stage-4 5/12] RUN pacman -Syu\\n#12 ERROR: pacman failed\\n"}
+	defer func() { buildRunner = prev }()
+
+	err := (driveConfig{}).runBuildctl(context.Background(), "comfyui-cdi", []string{"build"})
+	if err == nil {
+		t.Fatal("runBuildctl returned nil although buildctl failed")
+	}
+	if !strings.Contains(err.Error(), "#12 ERROR: pacman failed") {
+		t.Fatalf("the call site dropped the captured output: %v", err)
 	}
 }
