@@ -97,6 +97,40 @@ func imageTags(box spec.BuildResolveBox) []string {
 	return []string{box.FullTag}
 }
 
+// runBuildctl runs the build and hands the captured output to buildFailure. It exists as a
+// METHOD so the call site — the line that once discarded `out` — is exercised by a test with an
+// injected buildRunner: reverting it to `if _, err := runner.Run(...)` fails that test.
+func (c driveConfig) runBuildctl(ctx context.Context, boxName string, args []string) error {
+	out, err := buildRunner.Run(ctx, buildkitdrive.BuildctlBinary, args...)
+	if err != nil {
+		return buildFailure(boxName, err, out)
+	}
+	return nil
+}
+
+// buildFailure is the ONE place a failed build's error is built, and the reason it exists as a
+// function: the runner CAPTURES buildctl's combined output, and the caller used to discard it,
+// so a failing step's own error text reached no artifact at all (opencharly/charly#1255). The
+// output's tail goes into the error — bounded, and with no dangling newline when there is none.
+func buildFailure(boxName string, err error, out string) error {
+	if tail := tailLines(out, tailLineCount); tail != "" {
+		return fmt.Errorf("building %s: %w\n%s", boxName, err, tail)
+	}
+	return fmt.Errorf("building %s: %w", boxName, err)
+}
+
+// tailLines returns the last n lines of a captured command output, so a failed build carries its
+// own diagnostics without dumping megabytes into the error. An empty output yields "".
+const tailLineCount = 60
+
+func tailLines(out string, n int) string {
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
 // buildImage builds one image through the BuildKit drive and bridges it into the run engine's
 // store.
 //
@@ -204,9 +238,14 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	}
 	fmt.Fprintf(os.Stderr, "\n--- Building %s ---\n", box.Name)
 
+	// The runner CAPTURES the command's combined output — but this call used to DISCARD it and
+	// wrap only `exit status 1`, so a failed build step left its own error text nowhere: the step
+	// log ended at the RUN line and the daemon log carried no error (measured on
+	// opencharly/charly#1255, where that hid a pacman failure behind five hypotheses). A build's
+	// diagnostics must survive the build: keep the TAIL of the captured output in the error.
 	runner := buildRunner
-	if _, err := runner.Run(ctx, buildkitdrive.BuildctlBinary, args...); err != nil {
-		return fmt.Errorf("building %s: %w", box.Name, err)
+	if err := c.runBuildctl(ctx, box.Name, args); err != nil {
+		return err
 	}
 
 	// Name the archive, then make the image durable in the charly image store, then materialise it
