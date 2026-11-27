@@ -259,7 +259,8 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 
 	// The artifact is now complete. Decide its ref from its OWN content address: a rebuild
 	// that produced the newest local artifact keeps that artifact's ref (no churn); a changed
-	// artifact gets a fresh CalVer. A reused ref is already in the engine AND the store, so
+	// artifact gets a fresh CalVer (minute-bumped when that minute is already taken by a
+	// different artifact). A reused ref is already in the engine AND the store, so
 	// there is nothing to annotate, store or import.
 	newID, err := buildkitdrive.ImageID(dest)
 	if err != nil {

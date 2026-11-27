@@ -4,10 +4,12 @@ package build
 //
 // The drive always builds. When the freshly built artifact is BYTE-IDENTICAL to the newest
 // local build of the same box it publishes that build's existing ref instead of minting a new
-// CalVer; when the artifact changed it mints a fresh CalVer. The predicate is the artifact's
-// own content address (the image config digest), never the build clock: a tag change alone
-// with the same digest is a BuildKit cache hit, and a rebuild with a changed digest MUST get a
-// new ref (silently re-pointing an existing tag at different bytes is worse than churn).
+// CalVer; when the artifact changed it mints a fresh one (`mintAutoRef`: the calendar minute,
+// or that minute with a `-N` suffix when a DIFFERENT artifact already owns it). The predicate
+// is the artifact's own content address (the image config digest), never the build clock: a
+// tag change alone with the same digest is a BuildKit cache hit, and a rebuild with a changed
+// digest MUST get a new ref (silently re-pointing an existing tag at different bytes is worse
+// than churn).
 //
 // Scope: a ref whose tag was EXPLICITLY requested (`--tag`) is the caller's to name and is
 // never replaced; a push target's ref is baked into the buildctl argv (the push exporter)
