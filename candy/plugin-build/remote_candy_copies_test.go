@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/opencharly/sdk/deploykit"
 	"github.com/opencharly/sdk/loaderkit"
 	"github.com/opencharly/spec/spec"
 )
@@ -46,7 +47,11 @@ func TestCreateRemoteCandyCopies_StagesRemoteCandySource(t *testing.T) {
 		t.Fatalf("createRemoteCandyCopies: %v", err)
 	}
 
-	staged := filepath.Join(buildDir, "_candy", "marker."+ver, "copied.dat")
+	// The stage dir name is NOT `<name>.<version>` any more: spec's CandyStageDirName is
+	// CONTENT-ADDRESSED (a hash of the staged source tree, with the version-keyed form only as
+	// the fallback when the source cannot be hashed). Ask the same function the emitter uses,
+	// so this guard tracks the real contract instead of a stale spelling.
+	staged := filepath.Join(buildDir, "_candy", deploykit.CandyStageDirName(candies["marker"]), "copied.dat")
 	if _, err := os.Stat(staged); err != nil {
 		t.Fatalf("remote candy source not staged at %s (the per-candy scratch stage's COPY would fail): %v", staged, err)
 	}
