@@ -189,14 +189,23 @@ func runBoxGenerate(ctx context.Context, ex *sdk.Executor, req spec.BuildRequest
 // BuildCmd.buildImages branch-for-branch.
 func (c driveConfig) buildImages(ctx context.Context, ex *sdk.Executor, reply spec.BuildResolveReply, boxByName map[string]spec.BuildResolveBox, containerfiles map[string]string) ([]spec.BuildResolveBox, error) {
 	var built []spec.BuildResolveBox
+	// decided maps a box's RESOLVE-TIME FullTag to the ref the drive actually published (a
+	// reused older artifact or a freshly minted CalVer). A child's Containerfile is rewritten
+	// with these before it builds, so its ARG BASE_IMAGE / builder FROM name a real artifact
+	// (opencharly/charly#1292, option B).
+	decided := map[string]string{}
 
 	if len(reply.Order) > 0 {
 		// Filtered build: sequential dependency order.
 		for _, name := range reply.Order {
 			box := boxByName[name]
-			if err := c.buildImage(ctx, box, containerfiles[name]); err != nil {
+			ref, err := c.buildImage(ctx, box, containerfiles[name], decided, isAutoTag(box.FullTag))
+			if err != nil {
 				return nil, fmt.Errorf("building %s: %w", name, err)
 			}
+			decided[box.FullTag] = ref
+			box.FullTag = ref
+			boxByName[name] = box
 			built = append(built, box)
 			if box.MergeAuto {
 				c.mergeBox(ctx, ex, box)
@@ -213,24 +222,32 @@ func (c driveConfig) buildImages(ctx context.Context, ex *sdk.Executor, reply sp
 
 	for i, level := range reply.Levels {
 		fmt.Fprintf(os.Stderr, "\n=== Build level %d/%d (%d images) ===\n", i+1, len(reply.Levels), len(level))
+		// Boxes in one level are independent, so they may read the decided map concurrently;
+		// it is written only after the level completes.
+		refs := make([]string, len(level))
 
 		if len(level) == 1 {
 			// Single image, no need for goroutine overhead.
 			name := level[0]
 			box := boxByName[name]
-			if err := c.buildImage(ctx, box, containerfiles[name]); err != nil {
+			ref, err := c.buildImage(ctx, box, containerfiles[name], decided, isAutoTag(box.FullTag))
+			if err != nil {
 				return nil, fmt.Errorf("building %s: %w", name, err)
 			}
+			refs[0] = ref
 		} else {
 			g, _ := errgroup.WithContext(ctx)
 			g.SetLimit(jobs)
 
-			for _, name := range level {
+			for idx, name := range level {
+				idx, name := idx, name
 				box := boxByName[name]
 				g.Go(func() error {
-					if err := c.buildImage(ctx, box, containerfiles[name]); err != nil {
+					ref, err := c.buildImage(ctx, box, containerfiles[name], decided, isAutoTag(box.FullTag))
+					if err != nil {
 						return fmt.Errorf("building %s: %w", name, err)
 					}
+					refs[idx] = ref
 					return nil
 				})
 			}
@@ -242,8 +259,11 @@ func (c driveConfig) buildImages(ctx context.Context, ex *sdk.Executor, reply sp
 
 		// Merge this level before building the next so children start from a merged
 		// (fewer-layer) base image.
-		for _, name := range level {
+		for idx, name := range level {
 			box := boxByName[name]
+			decided[box.FullTag] = refs[idx]
+			box.FullTag = refs[idx]
+			boxByName[name] = box
 			if box.MergeAuto {
 				c.mergeBox(ctx, ex, box)
 			}

@@ -55,7 +55,7 @@ func TestBuildImage_LiveBuildsAndBridgesIntoTheRunEngine(t *testing.T) {
 
 	defer exec.Command("podman", "rmi", "-f", tag).Run() //nolint:errcheck
 
-	if err := cfg.buildImage(context.Background(), box, cfile); err != nil {
+	if _, err := cfg.buildImage(context.Background(), box, cfile, nil, false); err != nil {
 		t.Fatalf("buildImage: %v", err)
 	}
 
@@ -135,7 +135,7 @@ func TestBuildImage_LivePushOutsideTargetsIsNotPublished(t *testing.T) {
 
 	defer exec.Command("podman", "rmi", "-f", tag).Run() //nolint:errcheck
 
-	if err := cfg.buildImage(context.Background(), box, cfile); err != nil {
+	if _, err := cfg.buildImage(context.Background(), box, cfile, nil, false); err != nil {
 		t.Fatalf("a built image outside the push targets must be built without a registry push: %v", err)
 	}
 	if !kit.LocalImageExists("podman", tag) {
@@ -180,7 +180,7 @@ func TestBuildImage_RemovesTheExportWhenTheBridgeFails(t *testing.T) {
 	buildRunner = failingLoadRunner{inner: buildkitdrive.ExecRunner{}}
 	defer func() { buildRunner = prev }()
 
-	if err := cfg.buildImage(context.Background(), box, cfile); err == nil {
+	if _, err := cfg.buildImage(context.Background(), box, cfile, nil, false); err == nil {
 		t.Fatal("buildImage succeeded although the bridge failed")
 	}
 

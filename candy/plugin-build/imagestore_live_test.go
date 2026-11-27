@@ -64,7 +64,7 @@ func TestImageStore_AnnotationNamesTheImport_AndItsAbsenceDoesNot(t *testing.T) 
 
 	const named = "localhost/w36-named-live:2026.296.1200"
 	namedFile := "FROM alpine:3.20\nLABEL w36=named\nCMD [\"/bin/true\"]\n"
-	if err := cfg.buildImage(ctx, spec.BuildResolveBox{Name: "w36named", FullTag: named}, namedFile); err != nil {
+	if _, err := cfg.buildImage(ctx, spec.BuildResolveBox{Name: "w36named", FullTag: named}, namedFile, nil, false); err != nil {
 		t.Fatalf("buildImage: %v", err)
 	}
 	defer exec.Command("podman", "rmi", "-f", named).Run() //nolint:errcheck
@@ -192,7 +192,7 @@ func TestImageStore_BoxOnBoxBuildsWithTheRegistryUnreachable(t *testing.T) {
 	// the "registry unreachable" condition is a property of the reference, not of this host.
 	parentRef := "ghcr.invalid/opencharly/w36-live-parent:2026.296.1200"
 	parentFile := "FROM alpine:3.20\nLABEL w36=parent\nCMD [\"/bin/true\"]\n"
-	if err := cfg.buildImage(ctx, spec.BuildResolveBox{Name: "w36parent", FullTag: parentRef}, parentFile); err != nil {
+	if _, err := cfg.buildImage(ctx, spec.BuildResolveBox{Name: "w36parent", FullTag: parentRef}, parentFile, nil, false); err != nil {
 		t.Fatalf("building the parent: %v", err)
 	}
 	store, err := storekit.OpenImageStore()
@@ -207,14 +207,14 @@ func TestImageStore_BoxOnBoxBuildsWithTheRegistryUnreachable(t *testing.T) {
 	// comes from the store binding and not from some other resolution path.
 	missingRef := "ghcr.invalid/opencharly/w36-live-absent:2026.296.1200"
 	missingFile := "ARG BASE_IMAGE=" + missingRef + "\nFROM ${BASE_IMAGE}\nLABEL w36=missing-control\n"
-	if err := cfg.buildImage(ctx, spec.BuildResolveBox{Name: "w36missing", FullTag: "localhost/w36-missing:2026.296.1200"}, missingFile); err == nil {
+	if _, err := cfg.buildImage(ctx, spec.BuildResolveBox{Name: "w36missing", FullTag: "localhost/w36-missing:2026.296.1200"}, missingFile, nil, false); err == nil {
 		t.Fatalf("a child whose base is absent from the store and unreachable in the registry BUILT — "+
 			"the box-on-box result below would prove nothing (base %s)", missingRef)
 	}
 
 	childRef := "localhost/w36-live-child:2026.296.1200"
 	childFile := "ARG BASE_IMAGE=" + parentRef + "\nFROM ${BASE_IMAGE}\nLABEL w36=child\nCMD [\"/bin/true\"]\n"
-	if err := cfg.buildImage(ctx, spec.BuildResolveBox{Name: "w36child", FullTag: childRef}, childFile); err != nil {
+	if _, err := cfg.buildImage(ctx, spec.BuildResolveBox{Name: "w36child", FullTag: childRef}, childFile, nil, false); err != nil {
 		t.Fatalf("the box-on-box build failed with the parent in the store: %v", err)
 	}
 	defer exec.Command("podman", "rmi", "-f", childRef).Run()  //nolint:errcheck
