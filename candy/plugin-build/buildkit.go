@@ -166,10 +166,7 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	// The daemon's one setting this drive resolves is the renamed INNER concurrency
 	// (`stage_parallelism`, formerly `podman build --jobs N`): under BuildKit it is the daemon's
 	// `[worker.oci] max-parallelism`, applied when the daemon starts.
-	daemon, err := buildkitdrive.Ensure(ctx, buildkitdrive.ExecRunner{}, buildkitdrive.DaemonOptions{
-		MaxParallelism: c.StageParallelism,
-		RegistryMirror: c.RegistryMirror,
-	})
+	daemon, err := buildkitdrive.Ensure(ctx, buildkitdrive.ExecRunner{}, c.daemonOptions())
 	if err != nil {
 		return "", fmt.Errorf("preparing the builder for %s: %w", box.Name, err)
 	}
@@ -464,6 +461,52 @@ func (c driveConfig) pushOutputFor(box spec.BuildResolveBox) []string {
 // do about it. It stays wrapped with %w so callers can still errors.Is/As the primitive's error.
 func imageBuildLockError(box spec.BuildResolveBox, err error) error {
 	return fmt.Errorf("acquiring the per-image build lock for %s (%s): %w — another charly process is building this image; wait for it to finish and re-run (the second build then re-uses the builder's cache)", box.Name, box.FullTag, err)
+}
+
+// daemonOptions maps the project's authored `defaults.buildkit` onto the buildkitdrive
+// daemon settings. An unauthored field takes the drive's fallback: the resolved stage
+// parallelism for max-parallelism and the CHARLY_BUILD_REGISTRY_MIRROR env for the mirror.
+// The GC budget itself defaults in sdk/buildkitdrive (100 GB), so a project that authors
+// nothing still gets the cache-preserving policy instead of buildkitd's 373 GB free-space
+// target that prunes the cache to its ~10 GB floor (opencharly/charly#1292).
+func (c driveConfig) daemonOptions() buildkitdrive.DaemonOptions {
+	opts := buildkitdrive.DaemonOptions{
+		MaxParallelism: c.StageParallelism,
+		RegistryMirror: c.RegistryMirror,
+	}
+	bk := c.Buildkit
+	if bk == nil {
+		return opts
+	}
+	if bk.ProcessMode != "" {
+		opts.ProcessMode = bk.ProcessMode
+	}
+	if bk.MaxParallelism > 0 {
+		opts.MaxParallelism = int(bk.MaxParallelism)
+	}
+	opts.Snapshotter = bk.Snapshotter
+	opts.NoProcessSandbox = bk.NoProcessSandbox
+	if bk.GC != nil && !*bk.GC {
+		opts.GCDisabled = true
+	}
+	opts.GCReservedSpace = bk.ReservedSpace
+	opts.GCMaxUsedSpace = bk.MaxUsedSpace
+	opts.GCMinFreeSpace = bk.MinFreeSpace
+	for _, p := range bk.GCPolicy {
+		opts.GCPolicies = append(opts.GCPolicies, buildkitdrive.GCPolicy{
+			ReservedSpace: p.ReservedSpace,
+			MaxUsedSpace:  p.MaxUsedSpace,
+			MinFreeSpace:  p.MinFreeSpace,
+			KeepDuration:  p.KeepDuration,
+			All:           p.All,
+			Filters:       p.Filters,
+		})
+	}
+	if bk.RegistryMirror != "" {
+		opts.RegistryMirror = bk.RegistryMirror
+	}
+	opts.Extra = bk.Extra
+	return opts
 }
 
 // buildPlatforms narrows a local solve to ONE platform.

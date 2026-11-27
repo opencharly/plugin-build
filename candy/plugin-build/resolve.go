@@ -271,7 +271,11 @@ func resolveBuildEngine(ctx context.Context, ex *sdk.Executor, req spec.BuildReq
 		StageParallelism: int64(buildkit.ResolveStageParallelism(resolveDriveStageParallelism(int(req.StageParallelism), def), resolveIntPtrDrive(def.StageParallelismCap))),
 		Cache:            resolveDriveCache(req.Cache, def),
 		KeepImages:       int64(resolveIntPtrDrive(def.KeepImages)),
-		ResolvedProject:  rp,
+		// The daemon settings the project authored under defaults.buildkit. One buildkitd
+		// serves every box, so this is read from defaults only (a box-level value is
+		// documented as ignored by the schema).
+		Buildkit:        def.Buildkit,
+		ResolvedProject: rp,
 	}, nil
 }
 
