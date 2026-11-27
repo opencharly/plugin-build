@@ -84,8 +84,62 @@ func chooseBuiltRef(fullTag, newImageID string, autoTag, pushTarget bool, locals
 	if bestRef != "" && sameDigest(bestID, newImageID) && prev.StoreHas {
 		return bestRef, true, prev
 	}
-	// 4. The artifact is new: mint a fresh CalVer.
-	return repo + ":" + buildkit.ComputeCalVer(), false, prev
+	// 4. The artifact is new: mint a fresh CalVer, bumping the minute when the computed tag
+	//    is already taken by a DIFFERENT artifact (two changed builds inside one minute
+	//    would otherwise overwrite each other's tag — the churn the reuse predicate exists
+	//    to stop, in its worst form: a tag silently re-pointed at different bytes).
+	return mintAutoRef(repo, buildkit.ComputeCalVer(), newImageID, locals, storeHas), false, prev
+}
+
+// mintAutoRef returns the ref for a NEW artifact: the CalVer tag when it is free, else the
+// same CalVer with a numeric suffix (`-2`, `-3`, ...). A tag is TAKEN when the engine or the
+// charly store already names it for a different content address; when it names the SAME
+// artifact the ref is that artifact's and is returned unchanged.
+//
+// The bump is what keeps the predicate's own promise ("never re-point a tag at different
+// bytes") true across the minute boundary: two changed builds inside one minute produce
+// `...:HHMM` and `...:HHMM-2`, not one tag written twice.
+func mintAutoRef(repo, base, newImageID string, locals []kit.LocalImageInfo, storeHas func(string) bool) string {
+	for n := 1; n <= 99; n++ {
+		tag := base
+		if n > 1 {
+			tag = fmt.Sprintf("%s-%d", base, n)
+		}
+		ref := repo + ":" + tag
+		if id, ok := engineRefID(locals, ref); ok {
+			if sameDigest(id, newImageID) {
+				return ref // already this artifact: nothing to distinguish
+			}
+			continue // a different artifact owns the minute: bump
+		}
+		if storeHas(ref) {
+			continue // the store holds it for another payload
+		}
+		return ref
+	}
+	// Pathological (99 changed builds in one minute): stay unique rather than overwrite.
+	return fmt.Sprintf("%s:%s-%s", repo, base, shortDigest(newImageID))
+}
+
+// engineRefID returns the image ID the engine reports for an exact ref name.
+func engineRefID(locals []kit.LocalImageInfo, ref string) (string, bool) {
+	for _, img := range locals {
+		for _, name := range img.Names {
+			if name == ref {
+				return img.ID, true
+			}
+		}
+	}
+	return "", false
+}
+
+// shortDigest is the 12-hex content suffix used only when every numeric slot is taken.
+func shortDigest(imageID string) string {
+	d := strings.TrimPrefix(imageID, "sha256:")
+	if len(d) > 12 {
+		d = d[:12]
+	}
+	return d
 }
 
 // isAutoTag reports whether a box's tag is the drive's own auto CalVer (YYYY.DDD.HHMM), as
@@ -93,6 +147,16 @@ func chooseBuiltRef(fullTag, newImageID string, autoTag, pushTarget bool, locals
 // release tag, a user tag), which names the artifact and is never replaced.
 func isAutoTag(fullTag string) bool {
 	tag := refTag(fullTag)
+	// A collision-bumped auto tag (`YYYY.DDD.HHMM-2`) is still the drive's own: split the
+	// numeric suffix off and grammar-check the CalVer prefix.
+	if i := strings.IndexByte(tag, '-'); i >= 0 {
+		return isCalVer(tag[:i]) && isDigits(tag[i+1:])
+	}
+	return isCalVer(tag)
+}
+
+// isCalVer reports whether tag is the drive's bare CalVer form, YYYY.DDD.HHMM.
+func isCalVer(tag string) bool {
 	if len(tag) != 13 { // 4 + 1 + 3 + 1 + 4
 		return false
 	}
@@ -106,6 +170,19 @@ func isAutoTag(fullTag string) bool {
 			if c < '0' || c > '9' {
 				return false
 			}
+		}
+	}
+	return true
+}
+
+// isDigits reports whether s is a non-empty run of ASCII digits.
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
 		}
 	}
 	return true

@@ -1,6 +1,7 @@
 package build
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -110,6 +111,75 @@ func TestRefRepo(t *testing.T) {
 	} {
 		if got := refRepo(in); got != want {
 			t.Errorf("refRepo(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestMintAutoRef — minting a NEW artifact must never overwrite a tag a different artifact
+// already owns: two changed builds inside one CalVer minute produce `HHMM` and `HHMM-2`
+// (the churn the reuse predicate exists to stop, in its worst form: a tag silently
+// re-pointed at different bytes).
+func TestMintAutoRef(t *testing.T) {
+	const repo = "ghcr.io/opencharly/arch"
+	const base = "2026.331.1207"
+	free := func(string) bool { return false }
+	const newID = "sha256:new"
+
+	if got, want := mintAutoRef(repo, base, newID, nil, free), repo+":"+base; got != want {
+		t.Errorf("a free minute mints the bare CalVer: got %q want %q", got, want)
+	}
+
+	taken := []kit.LocalImageInfo{{ID: "sha256:aaa", Names: []string{repo + ":" + base}}}
+	if got, want := mintAutoRef(repo, base, newID, taken, free), repo+":"+base+"-2"; got != want {
+		t.Errorf("a minute taken by a DIFFERENT artifact bumps: got %q want %q", got, want)
+	}
+
+	taken2 := append(taken, kit.LocalImageInfo{ID: "sha256:bbb", Names: []string{repo + ":" + base + "-2"}})
+	if got, want := mintAutoRef(repo, base, newID, taken2, free), repo+":"+base+"-3"; got != want {
+		t.Errorf("a taken suffix bumps further: got %q want %q", got, want)
+	}
+
+	same := []kit.LocalImageInfo{{ID: newID, Names: []string{repo + ":" + base}}}
+	if got, want := mintAutoRef(repo, base, newID, same, free), repo+":"+base; got != want {
+		t.Errorf("the tag already names THIS artifact: got %q want %q", got, want)
+	}
+
+	if got, want := mintAutoRef(repo, base, newID, nil, func(ref string) bool { return ref == repo+":"+base }),
+		repo+":"+base+"-2"; got != want {
+		t.Errorf("a tag the STORE holds is taken: got %q want %q", got, want)
+	}
+
+	// Every numeric slot occupied: fall back to a content suffix rather than overwrite.
+	var all []kit.LocalImageInfo
+	for n := 1; n <= 99; n++ {
+		tag := base
+		if n > 1 {
+			tag = fmt.Sprintf("%s-%d", base, n)
+		}
+		all = append(all, kit.LocalImageInfo{ID: fmt.Sprintf("sha256:%02d", n), Names: []string{repo + ":" + tag}})
+	}
+	if got, want := mintAutoRef(repo, base, newID, all, free), repo+":"+base+"-new"; got != want {
+		t.Errorf("an exhausted minute must mint the content suffix instead of overwriting: got %q want %q", got, want)
+	}
+}
+
+// TestIsAutoTag — the drive's own tag grammar, now including the collision suffix. A caller
+// tag (a bed/release/user name) must never be mistaken for one, or a build would replace the
+// ref the caller named.
+func TestIsAutoTag(t *testing.T) {
+	for tag, want := range map[string]bool{
+		"2026.331.1207":                     true,
+		"2026.331.1207-2":                   true,
+		"2026.331.1207-12":                  true,
+		"check-openwebui-pod-2026.331.0504": false,
+		"probe-1292":                        false,
+		"2026.331.1207-x":                   false,
+		"2026.331.1207-":                    false,
+		"2026.331.120":                      false,
+		"release-2026.331.1207":             false,
+	} {
+		if got := isAutoTag("ghcr.io/opencharly/arch:" + tag); got != want {
+			t.Errorf("isAutoTag(%q) = %v, want %v", tag, got, want)
 		}
 	}
 }
