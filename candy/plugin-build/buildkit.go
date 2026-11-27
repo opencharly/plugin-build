@@ -139,22 +139,28 @@ func tailLines(out string, n int) string {
 // block here, then re-use BuildKit's own cache), while DISTINCT images take distinct locks and
 // build in parallel. The wait is spec/lock's bounded-but-REPORTED one: a peer building the same
 // image is a SLOW holder, not a stuck one, so the second builder QUEUES and reports the holder.
-func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, containerfile string) (err error) {
+func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, containerfile string, decided map[string]string, reuse bool) (builtRef string, err error) {
 	release, err := kit.AcquireImageBuildLock(box.FullTag)
 	if err != nil {
-		return imageBuildLockError(box, err)
+		return "", imageBuildLockError(box, err)
 	}
 	defer func() { _ = release() }()
+
+	// A parent this build already produced may have been published under a REUSED ref
+	// (opencharly/charly#1292, option B): rewrite the resolve-time refs to the refs that
+	// actually exist, so this box's ARG BASE_IMAGE / builder FROM name the artifact rather
+	// than a minted placeholder.
+	containerfile = applyRefSubstitutions(containerfile, decided)
 
 	// BuildKit reads the Containerfile and the context from the FILESYSTEM (the engine took the
 	// Containerfile on stdin). This writes the canonical generated path — the render step wrote
 	// the same bytes there — so the file the build reads is the file the render produced.
 	cfile := filepath.Join(c.BuildDir, box.Name, "Containerfile")
 	if err := os.MkdirAll(filepath.Dir(cfile), 0o755); err != nil {
-		return fmt.Errorf("preparing the build context for %s: %w", box.Name, err)
+		return "", fmt.Errorf("preparing the build context for %s: %w", box.Name, err)
 	}
 	if err := os.WriteFile(cfile, []byte(containerfile), 0o644); err != nil {
-		return fmt.Errorf("writing the Containerfile for %s: %w", box.Name, err)
+		return "", fmt.Errorf("writing the Containerfile for %s: %w", box.Name, err)
 	}
 
 	// The daemon's one setting this drive resolves is the renamed INNER concurrency
@@ -165,7 +171,7 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 		RegistryMirror: c.RegistryMirror,
 	})
 	if err != nil {
-		return fmt.Errorf("preparing the builder for %s: %w", box.Name, err)
+		return "", fmt.Errorf("preparing the builder for %s: %w", box.Name, err)
 	}
 
 	// ⚑ The base image is a build ARG that BuildKit resolves INSIDE `buildctl`
@@ -176,12 +182,12 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	// the project's charly.yml -> pull -> build locally), so a recipe sitting in this very project
 	// is used instead of surfacing as the registry's auth error (charly#949).
 	if err := c.ensureBaseImage(ctx, containerfile, box.Name); err != nil {
-		return err
+		return "", err
 	}
 
 	stageDir, err := buildkitdrive.StageDir()
 	if err != nil {
-		return err
+		return "", err
 	}
 	dest := buildkitdrive.ExportFile(stageDir, box.FullTag)
 	// The archive is a full copy of the image with ONE consumer (the bridge below), and a build
@@ -215,11 +221,11 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	// the unmodified main tree as well).
 	bindings, err := bindStoreContexts(&build, box, containerfile)
 	if err != nil {
-		return err
+		return "", err
 	}
 	args, err := build.Args(dest)
 	if err != nil {
-		return err
+		return "", err
 	}
 	for _, b := range bindings {
 		args = append(args, "--opt", "context:"+b)
@@ -236,7 +242,10 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 		localRef = localRegistryRef(c.RegistryMirror, box.FullTag)
 		args = append(args, pushOutput(localRef)...)
 	}
-	fmt.Fprintf(os.Stderr, "\n--- Building %s ---\n", box.Name)
+	// The summary the issue's "missed control" asked for: the resolved base and builder refs
+	// are printed for every build, so tag churn is visible instead of inferred.
+	fmt.Fprintf(os.Stderr, "\n--- Building %s (base %s; builders %s) ---\n",
+		box.Name, orNone(containerfileBaseRef(containerfile)), joinOrNone(containerfileFromRefs(containerfile)))
 
 	// The runner CAPTURES the command's combined output — but this call used to DISCARD it and
 	// wrap only `exit status 1`, so a failed build step left its own error text nowhere: the step
@@ -245,32 +254,67 @@ func (c driveConfig) buildImage(ctx context.Context, box spec.BuildResolveBox, c
 	// diagnostics must survive the build: keep the TAIL of the captured output in the error.
 	runner := buildRunner
 	if err := c.runBuildctl(ctx, box.Name, args); err != nil {
-		return err
+		return "", err
+	}
+
+	// The artifact is now complete. Decide its ref from its OWN content address: a rebuild
+	// that produced the newest local artifact keeps that artifact's ref (no churn); a changed
+	// artifact gets a fresh CalVer (minute-bumped when that minute is already taken by a
+	// different artifact). A reused ref is already in the engine AND the store, so
+	// there is nothing to annotate, store or import.
+	newID, err := buildkitdrive.ImageID(dest)
+	if err != nil {
+		return "", fmt.Errorf("reading the %s image id: %w", box.Name, err)
+	}
+	ref, reused, prev, err := c.decideRef(box, newID, reuse)
+	if err != nil {
+		return "", err
+	}
+	if reused {
+		fmt.Fprintf(os.Stderr, "--- %s -> %s (reused; image %s) ---\n", box.Name, ref, newID)
+		return ref, nil
 	}
 
 	// Name the archive, then make the image durable in the charly image store, then materialise it
 	// into the run engine.
 	//
-	// ⚑ There is NO tag step. The export is annotated with `io.containerd.image.name=<FullTag>`
+	// ⚑ There is NO tag step. The export is annotated with `io.containerd.image.name=<ref>`
 	// BEFORE the import, and every engine measured applies that annotation on load — so the
 	// reference resolves because of the annotation, not because a second command re-applied it.
 	// The import VERIFIES the reference resolves, so a stripped annotation cannot pass for a
 	// successful build.
 	created := time.Now().UTC()
-	if err := annotateExport(dest, box.FullTag, created); err != nil {
-		return fmt.Errorf("naming the %s export: %w", box.Name, err)
+	if err := annotateExport(dest, ref, created); err != nil {
+		return "", fmt.Errorf("naming the %s export: %w", box.Name, err)
 	}
 	store, err := storekit.OpenImageStore()
 	if err != nil {
-		return fmt.Errorf("opening the charly image store: %w", err)
+		return "", fmt.Errorf("opening the charly image store: %w", err)
 	}
-	if err := store.Add(dest, box.FullTag); err != nil {
-		return fmt.Errorf("storing %s in the charly image store: %w", box.Name, err)
+	if err := store.Add(dest, ref); err != nil {
+		return "", fmt.Errorf("storing %s in the charly image store: %w", box.Name, err)
 	}
-	if err := importExport(ctx, runner, c.RunEngine, dest, box.FullTag); err != nil {
-		return fmt.Errorf("importing %s into the %s store: %w", box.Name, c.RunEngine, err)
+	if err := importExport(ctx, runner, c.RunEngine, dest, ref); err != nil {
+		return "", fmt.Errorf("importing %s into the %s store: %w", box.Name, c.RunEngine, err)
 	}
-	return nil
+	fmt.Fprintf(os.Stderr, "--- %s -> %s (built; image %s; previous %s) ---\n", box.Name, ref, newID, orNone(prev.Ref))
+	return ref, nil
+}
+
+// orNone renders an empty value as "none" for a summary line.
+func orNone(v string) string {
+	if v == "" {
+		return "none"
+	}
+	return v
+}
+
+// joinOrNone renders a ref list for a summary line.
+func joinOrNone(refs []string) string {
+	if len(refs) == 0 {
+		return "none"
+	}
+	return strings.Join(refs, ", ")
 }
 
 // bindStoreContexts hands the solve every stage reference this host can already resolve from the
